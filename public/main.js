@@ -486,19 +486,21 @@ function spawnOwn (slot) {
   const n = track.nearest(g.x, g.z, -1)
   own = {
     x: g.x, z: g.z, y: g.y, a: g.a, vx: 0, vz: 0, idx: n.idx, lap: 0, prog: n.prog, prevProg: n.prog, cpHalf: false, fin: false,
-    steer: 0, boost: 1, drifting: false, driftDir: 0, driftT: 0, turbo: 0, slipVis: 0, fwd: 0, lat: 0, off: false, shoulder: false,
+    steer: 0, boost: 1, boostOn: false, boostCd: 0, drifting: false, driftDir: 0, driftT: 0, turbo: 0, slipVis: 0, fwd: 0, lat: 0, off: false, shoulder: false,
     normal: new THREE.Vector3(0, 1, 0), quat: new THREE.Quaternion(), hitCool: 0, lastSkidL: null, lastSkidR: null, moved: false, slot
   }
   ownCar = new Car(me.color, me.name, true)
   scene.add(ownCar.group)
   placeCar(ownCar, own.x, own.y, own.z, own.a, own.quat)
+  boostPress = false
   camReset = true
 }
 
 function respawnOwn (slot) {
   const g = track.gridPose(slot)
   const n = track.nearest(g.x, g.z, -1)
-  Object.assign(own, { x: g.x, z: g.z, y: g.y, a: g.a, vx: 0, vz: 0, idx: n.idx, lap: 0, prog: n.prog, prevProg: n.prog, cpHalf: false, fin: false, boost: 1, drifting: false, turbo: 0, fwd: 0, lat: 0 })
+  Object.assign(own, { x: g.x, z: g.z, y: g.y, a: g.a, vx: 0, vz: 0, idx: n.idx, lap: 0, prog: n.prog, prevProg: n.prog, cpHalf: false, fin: false, boost: 1, boostOn: false, boostCd: 0, drifting: false, turbo: 0, fwd: 0, lat: 0 })
+  boostPress = false
   camReset = true
 }
 
@@ -533,6 +535,8 @@ function loadTrack (name) {
 
 // ---------- input ----------
 const keys = {}
+// Set on a fresh press of the boost key (not key-repeat, not held), consumed by step().
+let boostPress = false
 const KEYMAP = {
   ArrowLeft: 'left', ArrowRight: 'right', KeyA: 'left',
   KeyW: 'boost', ShiftLeft: 'boost', ShiftRight: 'boost', ArrowUp: 'boost',
@@ -550,6 +554,7 @@ addEventListener('keydown', e => {
   }
   if (e.target && e.target.tagName === 'BUTTON') e.target.blur()
   e.preventDefault()
+  if (k === 'boost' && !keys.boost && !e.repeat) boostPress = true
   keys[k] = true
   audio.resume()
 })
@@ -557,7 +562,10 @@ addEventListener('keyup', e => {
   const k = KEYMAP[e.code]
   if (k) keys[k] = false
 })
-addEventListener('blur', () => { for (const k in keys) keys[k] = false })
+addEventListener('blur', () => {
+  for (const k in keys) keys[k] = false
+  boostPress = false
+})
 
 function rescue () {
   if (!own || phase !== 'racing' || own.fin) return
@@ -648,10 +656,21 @@ function step (dt) {
   own.off = off
   own.shoulder = onShoulder && !onTrack
 
-  // Boost meter
-  const wantBoost = racing && !!keys.boost && own.boost > 0.02 && fwd > 2
+  // Boost meter.
+  // A boost is latched on by a fresh press (edge, not hold) when the meter is at/above 50% and no cooldown is
+  // running. Once latched it keeps going while the key is held, even below 50%, until the key is released, the
+  // meter empties, or racing stops. Any end starts a 1s cooldown during which presses are discarded.
+  own.boostCd = Math.max(0, own.boostCd - dt)
+  const press = boostPress
+  boostPress = false
+  if (own.boostOn && (!racing || !keys.boost || own.boost <= 0.02)) {
+    own.boostOn = false
+    own.boostCd = 1.0
+  }
+  if (!own.boostOn && press && racing && keys.boost && own.boostCd <= 0 && own.boost >= 0.5) own.boostOn = true
+  const wantBoost = own.boostOn && fwd > 2
   if (wantBoost) own.boost = Math.max(0, own.boost - dt * 0.36)
-  else own.boost = Math.min(1, own.boost + dt * (own.drifting ? 0.18 : 0.055))
+  else if (!own.boostOn) own.boost = Math.min(1, own.boost + dt * (own.drifting ? 0.18 : 0.055))
   own.boosting = wantBoost
   own.turbo = Math.max(0, own.turbo - dt)
   const turbo = own.turbo > 0
@@ -1173,7 +1192,7 @@ function hud (dt) {
     elGaugeArc.setAttribute('stroke-dashoffset', String(267 - 267 * f))
     elGaugeArc.setAttribute('stroke', own.boosting || own.turbo > 0 ? '#ff6d00' : own.off ? '#ef5350' : '#ffd54f')
     elBoost.style.width = (own.boost * 100).toFixed(0) + '%'
-    elBoost.className = own.boost > 0.98 ? 'ready' : ''
+    elBoost.className = own.boost >= 0.5 && own.boostCd <= 0 ? 'ready' : ''
   } else {
     elSpeedo.style.display = 'none'
   }
