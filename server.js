@@ -316,7 +316,7 @@ function handleMessage (c, m) {
     c.car.z = +q[1] || 0
     c.car.a = +q[2] || 0
     c.car.spd = Math.max(0, +q[5] || 0)
-    c.car.flags = (+q[6] | 0) & 15
+    c.car.flags = (+q[6] | 0) & 31
     if (state.phase === 'racing') {
       if (c.car.spd > 1) c.moved = true
       if (+q[3] > c.car.lap) c.car.lap = Math.min(+q[3], TOTAL_LAPS)

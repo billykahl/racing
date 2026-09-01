@@ -486,7 +486,7 @@ function spawnOwn (slot) {
   const n = track.nearest(g.x, g.z, -1)
   own = {
     x: g.x, z: g.z, y: g.y, a: g.a, vx: 0, vz: 0, idx: n.idx, lap: 0, prog: n.prog, prevProg: n.prog, cpHalf: false, fin: false,
-    steer: 0, boost: 1, boostOn: false, boostCd: 0, drifting: false, driftDir: 0, driftT: 0, turbo: 0, slipVis: 0, fwd: 0, lat: 0, off: false, shoulder: false,
+    steer: 0, boost: 1, boostOn: false, boostCd: 0, drifting: false, driftDir: 0, driftT: 0, driftRamp: 0, turbo: 0, slipVis: 0, fwd: 0, lat: 0, off: false, shoulder: false,
     normal: new THREE.Vector3(0, 1, 0), quat: new THREE.Quaternion(), hitCool: 0, lastSkidL: null, lastSkidR: null, moved: false, slot
   }
   ownCar = new Car(me.color, me.name, true)
@@ -499,7 +499,7 @@ function spawnOwn (slot) {
 function respawnOwn (slot) {
   const g = track.gridPose(slot)
   const n = track.nearest(g.x, g.z, -1)
-  Object.assign(own, { x: g.x, z: g.z, y: g.y, a: g.a, vx: 0, vz: 0, idx: n.idx, lap: 0, prog: n.prog, prevProg: n.prog, cpHalf: false, fin: false, boost: 1, boostOn: false, boostCd: 0, drifting: false, turbo: 0, fwd: 0, lat: 0 })
+  Object.assign(own, { x: g.x, z: g.z, y: g.y, a: g.a, vx: 0, vz: 0, idx: n.idx, lap: 0, prog: n.prog, prevProg: n.prog, cpHalf: false, fin: false, boost: 1, boostOn: false, boostCd: 0, drifting: false, driftDir: 0, driftT: 0, driftRamp: 0, turbo: 0, fwd: 0, lat: 0 })
   boostPress = false
   camReset = true
 }
@@ -576,6 +576,7 @@ function rescue () {
   own.vx = own.vz = 0
   own.fwd = own.lat = 0
   own.drifting = false
+  own.driftRamp = 0
 }
 
 function toggleMute () {
@@ -670,7 +671,7 @@ function step (dt) {
   if (!own.boostOn && press && racing && keys.boost && own.boostCd <= 0 && own.boost >= 0.5) own.boostOn = true
   const wantBoost = own.boostOn && fwd > 2
   if (wantBoost) own.boost = Math.max(0, own.boost - dt * 0.36)
-  else if (!own.boostOn) own.boost = Math.min(1, own.boost + dt * (own.drifting ? 0.18 : 0.055))
+  else if (!own.boostOn) own.boost = Math.min(1, own.boost + dt * (own.drifting && own.driftDir !== 0 ? 0.18 : 0.055))
   own.boosting = wantBoost
   own.turbo = Math.max(0, own.turbo - dt)
   const turbo = own.turbo > 0
@@ -707,11 +708,17 @@ function step (dt) {
   fwd -= 9.81 * slopeUp * 0.55 * dt
 
   // Drift
-  if (driftKey && !own.drifting && Math.abs(fwd) > 11 && st !== 0) {
+  // Space alone starts the drift: the rear goes loose (low grip, tail wag) with no extra turn yet. The first
+  // steer press while drifting locks the direction, and only then does the sharper drift turn ramp in over
+  // ~0.15s so the sequence reads "rear steps out, then the kart rotates". Mini-turbo time (driftT) and the
+  // faster boost regen only accrue while the drift is directional, so holding Space straight is no free reward.
+  if (driftKey && !own.drifting && Math.abs(fwd) > 11) {
     own.drifting = true
     own.driftDir = st
     own.driftT = 0
+    own.driftRamp = 0
   }
+  if (own.drifting && own.driftDir === 0 && st !== 0) own.driftDir = st
   if (own.drifting && (!driftKey || fwd < 5 || !racing)) {
     if (own.driftT > 0.9 && racing) {
       own.turbo = own.driftT > 2.2 ? 1.6 : 1.0
@@ -719,17 +726,25 @@ function step (dt) {
       burstSparks(own, 30, 0.4, 0.7, 1.0)
     }
     own.drifting = false
+    own.driftRamp = 0
   }
   let grip = 7.5
   let om
   const speedF = 1 / (1 + Math.max(0, fwd) / 70)
   if (own.drifting) {
-    own.driftT += dt
     grip = 1.7
-    om = own.driftDir * 1.9 * speedF + own.steer * 0.9 * speedF
-    fwd *= Math.exp(-0.16 * dt)
-    lat += -own.driftDir * 5 * dt
-    if (own.driftT > 0.9 && Math.floor(simTime * 30) % 2 === 0) burstSparks(own, 2, own.driftT > 2.2 ? 1.0 : 0.3, own.driftT > 2.2 ? 0.5 : 0.7, own.driftT > 2.2 ? 0.1 : 1.0)
+    if (own.driftDir !== 0) {
+      own.driftT += dt
+      own.driftRamp = Math.min(1, own.driftRamp + dt / 0.15)
+      om = own.driftDir * 1.9 * speedF * own.driftRamp + own.steer * 0.9 * speedF
+      fwd *= Math.exp(-0.16 * dt)
+      lat += -own.driftDir * 5 * dt
+      if (own.driftT > 0.9 && Math.floor(simTime * 30) % 2 === 0) burstSparks(own, 2, own.driftT > 2.2 ? 1.0 : 0.3, own.driftT > 2.2 ? 0.5 : 0.7, own.driftT > 2.2 ? 0.1 : 1.0)
+    } else {
+      // Neutral drift: no steer input, just a subtle loose-rear wobble that doesn't change the line.
+      om = own.steer * 0.9 * speedF
+      lat += Math.sin(simTime * 9) * 1.2 * dt
+    }
   } else {
     om = own.steer * 2.8 * Math.min(1, Math.abs(fwd) / 9) * speedF * (fwd < 0 ? -1 : 1)
   }
@@ -762,7 +777,7 @@ function step (dt) {
 
   // Skid marks + smoke
   const slip = own.drifting || Math.abs(lat) > 5 || (brake && fwd > 15)
-  own.slipVis += ((own.drifting ? own.driftDir * 0.28 : 0) - own.slipVis) * Math.min(1, dt * 6)
+  own.slipVis += ((own.drifting ? (own.driftDir !== 0 ? own.driftDir * 0.28 : Math.sin(simTime * 7) * 0.14) : 0) - own.slipVis) * Math.min(1, dt * 6)
   if (slip && racing && onShoulder) laySkids(own, hx2, hz2)
   else own.lastSkidL = own.lastSkidR = null
   if (racing && Math.abs(fwd) > 4) {
@@ -951,9 +966,11 @@ function updateRemotes (dt, now) {
     const drifting = !!(r.flags & 1)
     const boosting = !!(r.flags & 2)
     const braking = !!(r.flags & 4)
-    r.slipVis = (r.slipVis || 0) + ((drifting ? (r.flags & 8 ? -0.28 : 0.28) : 0) - (r.slipVis || 0)) * Math.min(1, dt * 6)
+    const neutral = drifting && !!(r.flags & 16)
+    const driftDir = drifting && !neutral ? (r.flags & 8 ? -1 : 1) : 0
+    r.slipVis = (r.slipVis || 0) + ((drifting ? (neutral ? Math.sin(simTime * 7) * 0.14 : driftDir * 0.28) : 0) - (r.slipVis || 0)) * Math.min(1, dt * 6)
     placeCar(r.car, r.x, r.y, r.z, r.a, r.quat, r.up, r.slipVis)
-    r.car.animate(dt, r.spd, drifting ? (r.flags & 8 ? -1 : 1) : 0, braking, boosting, simTime)
+    r.car.animate(dt, r.spd, driftDir, braking, boosting, simTime, drifting ? (driftDir || 2) : 0)
     if (drifting && r.spd > 4 && phase === 'racing') {
       const hx = Math.cos(r.a)
       const hz = Math.sin(r.a)
@@ -1322,12 +1339,12 @@ function tick (dt, render) {
   step(dt)
   if (own && ownCar) {
     placeCar(ownCar, own.x, own.y, own.z, own.a, own.quat, own.normal, own.slipVis)
-    ownCar.animate(dt, own.fwd, own.steer, !!keys.brake && phase === 'racing', own.boosting || own.turbo > 0, simTime)
+    ownCar.animate(dt, own.fwd, own.steer, !!keys.brake && phase === 'racing', own.boosting || own.turbo > 0, simTime, own.drifting ? (own.driftDir || 2) : 0)
     if (connected && ws.readyState === 1) {
       sendAcc += dt
       if (sendAcc > 0.05) {
         sendAcc = 0
-        const flags = (own.drifting ? 1 : 0) | (own.boosting || own.turbo > 0 ? 2 : 0) | (keys.brake && phase === 'racing' ? 4 : 0) | (own.drifting && own.driftDir < 0 ? 8 : 0)
+        const flags = (own.drifting ? 1 : 0) | (own.boosting || own.turbo > 0 ? 2 : 0) | (keys.brake && phase === 'racing' ? 4 : 0) | (own.drifting && own.driftDir < 0 ? 8 : 0) | (own.drifting && own.driftDir === 0 ? 16 : 0)
         ws.send(JSON.stringify({ t: 'st', q: [+own.x.toFixed(2), +own.z.toFixed(2), +own.a.toFixed(3), own.lap, +own.prog.toFixed(4), +own.fwd.toFixed(1), flags] }))
       }
     }
