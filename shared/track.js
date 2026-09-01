@@ -1,0 +1,249 @@
+// Shared track geometry. Units are metres. The track lives on the XZ plane
+// (x = east, z = south); elevation along the lap is a smooth profile in `elev(s)`.
+
+export const WORLD_W = 660
+export const WORLD_H = 380
+export const HALF_W = 7          // half width of the asphalt ribbon
+export const SHOULDER = 2.2      // rumble strip / verge width beyond HALF_W
+export const WALL_DIST = HALF_W + 4.5 // barrier distance from the centreline
+export const TOTAL_LAPS = 2
+export const MAX_PLAYERS = 14
+
+// Control points were laid out in a 1700x980 grid and are mapped to metres here.
+const SX = 0.385
+const SZ = 0.385
+const map = pts => pts.map(([x, y]) => [(x - 850) * SX, (y - 490) * SZ])
+
+const MAP_DEFS = [
+  {
+    name: 'Sunset Loop',
+    seed: 11,
+    hills: [[7, 1, 0.4], [3.5, 2, 2.1], [1.2, 5, 4.0]],
+    ctrl: map([
+      [720, 880], [1120, 860], [1420, 800], [1580, 620], [1600, 420],
+      [1500, 260], [1280, 180], [1050, 240], [900, 360], [740, 470],
+      [560, 420], [400, 520], [300, 680], [280, 850]
+    ])
+  },
+  {
+    name: 'Lakeside Oval',
+    seed: 23,
+    hills: [[4, 1, 1.0], [2.5, 3, 0.3], [1.0, 6, 2.2]],
+    ctrl: map([
+      [850, 890], [1350, 870], [1590, 720], [1630, 480], [1520, 260],
+      [1250, 150], [800, 140], [450, 190], [230, 340], [180, 560],
+      [240, 760], [350, 860]
+    ])
+  },
+  {
+    name: 'Twister Pass',
+    seed: 37,
+    hills: [[9, 1, 2.6], [3, 2, 0.9], [1.5, 4, 1.4]],
+    ctrl: map([
+      [880, 900], [1300, 880], [1520, 720], [1560, 500], [1400, 350],
+      [1130, 310], [940, 210], [690, 160], [500, 250], [600, 430],
+      [420, 530], [280, 670], [430, 850]
+    ])
+  },
+  {
+    name: 'Highland Hook',
+    seed: 51,
+    hills: [[11, 1, 5.2], [4, 2, 3.3], [1.4, 5, 0.7]],
+    ctrl: map([
+      [900, 890], [1330, 860], [1580, 660], [1560, 420], [1380, 300],
+      [1420, 170], [1150, 120], [880, 220], [760, 420], [560, 480],
+      [360, 380], [200, 520], [260, 760], [460, 875]
+    ])
+  }
+]
+
+export class Track {
+  constructor (def) {
+    this.name = def.name
+    this.seed = def.seed
+    this.hills = def.hills
+    this.ctrl = def.ctrl
+    this.pts = []
+    this.len = 0
+    this.build()
+  }
+
+  build () {
+    // Chaikin smoothing then Catmull-Rom, resampled to ~2 m spacing.
+    let c = this.ctrl
+    for (let round = 0; round < 2; round++) {
+      const cut = []
+      const n = c.length
+      for (let i = 0; i < n; i++) {
+        const a = c[i]
+        const b = c[(i + 1) % n]
+        cut.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25])
+        cut.push([a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75])
+      }
+      c = cut
+    }
+    const dense = []
+    const n = c.length
+    for (let i = 0; i < n; i++) {
+      const p0 = c[(i - 1 + n) % n]
+      const p1 = c[i]
+      const p2 = c[(i + 1) % n]
+      const p3 = c[(i + 2) % n]
+      for (let s = 0; s < 32; s++) dense.push(catmull(p0, p1, p2, p3, s / 32))
+    }
+    const spacing = 2
+    let acc = 0
+    this.pts.push({ x: dense[0].x, z: dense[0].z })
+    for (let i = 1; i <= dense.length; i++) {
+      const a = dense[(i - 1) % dense.length]
+      const b = dense[i % dense.length]
+      acc += Math.hypot(b.x - a.x, b.z - a.z)
+      if (acc >= spacing) {
+        acc = 0
+        this.pts.push({ x: b.x, z: b.z })
+      }
+    }
+    // Drop the last point if it nearly coincides with the first.
+    const f = this.pts[0]
+    const l = this.pts[this.pts.length - 1]
+    if (Math.hypot(f.x - l.x, f.z - l.z) < spacing * 0.5) this.pts.pop()
+
+    const m = this.pts.length
+    this.len = 0
+    for (let i = 0; i < m; i++) {
+      const a = this.pts[i]
+      const b = this.pts[(i + 1) % m]
+      a.s = this.len
+      a.tx = b.x - a.x
+      a.tz = b.z - a.z
+      const d = Math.hypot(a.tx, a.tz) || 1
+      a.tx /= d
+      a.tz /= d
+      this.len += d
+    }
+    // Curvature (signed) for banking / scenery decisions.
+    for (let i = 0; i < m; i++) {
+      const p = this.pts[(i - 3 + m) % m]
+      const q = this.pts[(i + 3) % m]
+      const cross = p.tx * q.tz - p.tz * q.tx
+      this.pts[i].k = cross / 12
+    }
+    this.minX = Math.min(...this.pts.map(p => p.x))
+    this.maxX = Math.max(...this.pts.map(p => p.x))
+    this.minZ = Math.min(...this.pts.map(p => p.z))
+    this.maxZ = Math.max(...this.pts.map(p => p.z))
+  }
+
+  // Elevation of the track centreline at arc length s.
+  elev (s) {
+    const t = (s / this.len) * Math.PI * 2
+    let h = 0
+    for (const [amp, freq, ph] of this.hills) h += amp * Math.sin(t * freq + ph)
+    // Keep the start/finish straight flat-ish so the grid sits level.
+    const w = smooth01(Math.min(s, this.len - s) / 70)
+    return h * w
+  }
+
+  at (s) {
+    const m = this.pts.length
+    s = ((s % this.len) + this.len) % this.len
+    let lo = 0
+    let hi = m - 1
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1
+      if (this.pts[mid].s <= s) lo = mid
+      else hi = mid - 1
+    }
+    return { pt: this.pts[lo], next: this.pts[(lo + 1) % m], idx: lo }
+  }
+
+  poseAt (s) {
+    const { pt, next } = this.at(s)
+    const seg = Math.hypot(next.x - pt.x, next.z - pt.z) || 1
+    const f = Math.max(0, Math.min(1, (s - pt.s) / seg))
+    const x = pt.x + (next.x - pt.x) * f
+    const z = pt.z + (next.z - pt.z) * f
+    return { x, z, a: Math.atan2(pt.tz, pt.tx), tx: pt.tx, tz: pt.tz, y: this.elev(s) }
+  }
+
+  gridPose (slot) {
+    const back = 12 + Math.floor(slot / 2) * 7.5
+    const lat = (slot % 2 === 0 ? -1 : 1) * 2.7
+    const p = this.poseAt(this.len - back)
+    return { x: p.x - p.tz * lat, z: p.z + p.tx * lat, a: p.a, y: p.y }
+  }
+
+  nearest (x, z, hint) {
+    const m = this.pts.length
+    let bestI = 0
+    let bestD = Infinity
+    if (hint >= 0) {
+      for (let k = -40; k <= 40; k++) {
+        const i = ((hint + k) % m + m) % m
+        const d = (this.pts[i].x - x) ** 2 + (this.pts[i].z - z) ** 2
+        if (d < bestD) {
+          bestD = d
+          bestI = i
+        }
+      }
+      if (bestD < 60 * 60) return this.refine(x, z, bestI)
+    }
+    bestD = Infinity
+    for (let i = 0; i < m; i += 3) {
+      const d = (this.pts[i].x - x) ** 2 + (this.pts[i].z - z) ** 2
+      if (d < bestD) {
+        bestD = d
+        bestI = i
+      }
+    }
+    return this.refine(x, z, bestI)
+  }
+
+  refine (x, z, idx) {
+    const m = this.pts.length
+    let bi = idx
+    let bd = Infinity
+    let bt = 0
+    let side = 0
+    for (const i of [((idx - 2) % m + m) % m, ((idx - 1) % m + m) % m, idx, (idx + 1) % m, (idx + 2) % m]) {
+      const a = this.pts[i]
+      const b = this.pts[(i + 1) % m]
+      const abx = b.x - a.x
+      const abz = b.z - a.z
+      const t = Math.max(0, Math.min(1, ((x - a.x) * abx + (z - a.z) * abz) / (abx * abx + abz * abz)))
+      const px = a.x + abx * t
+      const pz = a.z + abz * t
+      const d = (px - x) ** 2 + (pz - z) ** 2
+      if (d < bd) {
+        bd = d
+        bi = i
+        bt = t
+        side = Math.sign(abx * (z - a.z) - abz * (x - a.x))
+      }
+    }
+    const a = this.pts[bi]
+    const b = this.pts[(bi + 1) % m]
+    const seg = Math.hypot(b.x - a.x, b.z - a.z)
+    const s = a.s + seg * bt
+    return { idx: bi, dist: Math.sqrt(bd), prog: s / this.len, s, side, tx: a.tx, tz: a.tz, cx: a.x + (b.x - a.x) * bt, cz: a.z + (b.z - a.z) * bt }
+  }
+}
+
+function smooth01 (t) {
+  t = Math.max(0, Math.min(1, t))
+  return t * t * (3 - 2 * t)
+}
+
+function catmull (p0, p1, p2, p3, t) {
+  const t2 = t * t
+  const t3 = t2 * t
+  return {
+    x: 0.5 * (2 * p1[0] + (-p0[0] + p2[0]) * t + (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2 + (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3),
+    z: 0.5 * (2 * p1[1] + (-p0[1] + p2[1]) * t + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 + (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3)
+  }
+}
+
+export const tracks = MAP_DEFS.map(d => new Track(d))
+export function trackByName (name) {
+  return tracks.find(t => t.name === name) || tracks[0]
+}

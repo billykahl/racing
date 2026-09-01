@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vibe Racing — Chase Cam Karts</title>
+<link rel="icon" href="/favicon.svg">
+<link rel="stylesheet" href="/style.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "/vendor/three/build/three.module.js",
+    "three/addons/": "/vendor/three/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="gl"></canvas>
+
+<div id="standings" class="panel"></div>
+<div id="raceInfo" class="panel"></div>
+
+<div id="topCenter">
+  <div id="phaseMsg"></div>
+  <div id="subMsg"></div>
+</div>
+
+<div id="bigCount"></div>
+<div id="notice"></div>
+
+<div id="joinWrap">
+  <button id="joinBtn">JOIN RACE</button>
+  <div id="joinMsg"></div>
+</div>
+
+<div id="results" class="panel"></div>
+
+<div id="speedo">
+  <div id="gauge"><svg viewBox="0 0 200 120" width="200" height="120">
+    <path d="M20 105 A85 85 0 0 1 180 105" fill="none" stroke="rgba(255,255,255,0.15)" stroke-width="10" stroke-linecap="round"/>
+    <path id="gaugeArc" d="M20 105 A85 85 0 0 1 180 105" fill="none" stroke="#ffd54f" stroke-width="10" stroke-linecap="round" stroke-dasharray="267" stroke-dashoffset="267"/>
+  </svg>
+  <div id="speedVal">0</div><div id="speedUnit">km/h</div></div>
+  <div id="boostWrap"><div id="boostBar"></div><span>BOOST · W</span></div>
+</div>
+
+<canvas id="minimap" width="240" height="160"></canvas>
+
+<div id="hint">← → steer &middot; W boost &middot; S brake &middot; D / SPACE drift &middot; R rescue &middot; C camera</div>
+
+<div id="controls">
+  <select id="quality" title="Graphics quality">
+    <option value="ultra">Ultra</option>
+    <option value="high">High</option>
+    <option value="medium">Medium</option>
+  </select>
+  <button id="muteBtn" title="Toggle sound">🔊</button>
+  <button id="leaveBtn" title="Leave the grid" style="display:none">LEAVE</button>
+</div>
+
+<div id="fps"></div>
+
+<div id="overlay"><div class="box" id="overlayMsg">Loading track&hellip;</div></div>
+
+<script type="module" src="/main.js"></script>
+</body>
+</html>
