@@ -3,6 +3,7 @@
 import { spawn } from 'node:child_process'
 import WebSocket from 'ws'
 import { tracks, TOTAL_LAPS } from '../shared/track.js'
+import { CAR_COLORS } from '../shared/cars.js'
 
 const PORT = 8799
 const URL = 'ws://localhost:' + PORT
@@ -25,11 +26,12 @@ function assert (cond, msg) {
 }
 
 function mkClient (label) {
-  const c = { label, ws: new WebSocket(URL), snaps: [], joins: [], inits: [], maps: [], named: [], voted: [] }
+  const c = { label, ws: new WebSocket(URL), snaps: [], joins: [], inits: [], maps: [], named: [], cars: [], voted: [] }
   c.ws.on('message', raw => {
     const m = JSON.parse(raw.toString())
     if (m.t === 'init') c.inits.push(m)
     else if (m.t === 'named') c.named.push(m)
+    else if (m.t === 'car') c.cars.push(m)
     else if (m.t === 'voted') c.voted.push(m)
     else if (m.t === 'map') c.maps.push(m.name)
     else if (m.t === 'joined') c.joins.push(m)
@@ -103,10 +105,27 @@ send(A, { t: 'name', name: '   ' })
 assert(await waitFor(() => A.named.length === 3, 2000, 'blank name'), 'blank name answered')
 assert(A.named[2].ok === false && A.named[2].name === 'Speedy', 'blank name rejected, previous name kept')
 
+// Car picker: init carries the default style/colour, a pick is clamped and
+// echoed back, and the snapshot carries it to everyone.
+{
+  const i = A.inits[0]
+  assert(Number.isInteger(i.styleIdx) && Number.isInteger(i.colorIdx), 'init carries integer styleIdx/colorIdx: ' + i.styleIdx + '/' + i.colorIdx)
+  assert(i.color === CAR_COLORS[i.colorIdx], 'init colour hex matches the palette entry for colorIdx')
+}
+send(A, { t: 'car', style: 2, color: 5 })
+assert(await waitFor(() => A.cars.length === 1, 2000, 'A car'), 'car pick answered')
+assert(A.cars[0].ok && A.cars[0].style === 2 && A.cars[0].color === 5, 'car pick accepted with the requested style/colour: ' + JSON.stringify(A.cars[0]))
+send(A, { t: 'car', style: 99, color: -3 })
+assert(await waitFor(() => A.cars.length === 2, 2000, 'A car clamped'), 'out-of-range car pick answered')
+assert(A.cars[1].ok && A.cars[1].style === 0 && A.cars[1].color === 0, 'out-of-range style/colour are clamped to 0/0: ' + JSON.stringify(A.cars[1]))
+send(A, { t: 'car', style: 2, color: 5 })
+await waitFor(() => A.cars.length === 3, 2000, 'A car again')
+
 send(A, { t: 'join' })
 assert(await waitFor(() => A.joins.length === 1 && A.joins[0].ok, 2000, 'A joined'), 'A join accepted, slot ' + (A.joins[0] && A.joins[0].slot))
 await sleep(120)
 assert(carOf(A, A) && carOf(A, A).n === 'Speedy', 'snapshot carries the chosen name')
+assert(carOf(A, A) && carOf(A, A).sty === 2 && carOf(A, A).col === CAR_COLORS[5], 'snapshot carries the chosen car style and colour')
 send(A, { t: 'name', name: 'StillLobby' })
 assert(await waitFor(() => A.named.length === 4 && A.named[3].ok, 2000, 'lobby rename'), 'a racer can still rename while the lobby is open')
 await sleep(150)
@@ -133,11 +152,17 @@ assert(A.voted[3].ok === false && /lobby/.test(A.voted[3].why), 'vote outside th
 send(A, { t: 'name', name: 'TooLate' })
 assert(await waitFor(() => A.named.length === 5, 2000, 'locked rename'), 'rename during the race answered')
 assert(A.named[4].ok === false && A.named[4].name === 'StillLobby' && carOf(A, A).n === 'StillLobby', 'name is locked once the race starts')
+send(A, { t: 'car', style: 1, color: 1 })
+assert(await waitFor(() => A.cars.length === 4, 2000, 'locked car'), 'car change during the race answered')
+assert(A.cars[3].ok === false && A.cars[3].style === 2 && A.cars[3].color === 5 && carOf(A, A).sty === 2 && carOf(A, A).col === CAR_COLORS[5], 'car is locked once the race starts, previous pick kept')
 const S = await mkClient('S')
 await waitFor(() => S.inits.length, 2000, 'spectator init')
 send(S, { t: 'name', name: 'Watcher' })
 assert(await waitFor(() => S.named.length === 1, 2000, 'spectator rename'), 'spectator rename answered')
 assert(S.named[0].ok && S.named[0].name === 'Watcher', 'a spectator can rename while a race is running')
+send(S, { t: 'car', style: 3, color: 7 })
+assert(await waitFor(() => S.cars.length === 1, 2000, 'spectator car'), 'spectator car pick answered')
+assert(S.cars[0].ok && S.cars[0].style === 3 && S.cars[0].color === 7, 'a spectator can change car while a race is running')
 S.ws.close()
 
 // A drives and finishes both laps; B moves a little but never finishes.
@@ -154,6 +179,7 @@ assert(await waitFor(() => last(A).ph === 'finished', 6000, 'finished'), 'race e
 const res = last(A).res
 assert(res && res.length === 2 && res[0].id === A.inits[0].id && res[0].time > 0, 'winner ranked first with a time')
 assert(res[1].id === B.inits[0].id && res[1].time === 0, 'unfinished racer listed as DNF')
+assert(res[0].style === 2 && res[0].color === CAR_COLORS[5], 'results carry the winner\'s car style and colour')
 
 const firstMap = mapList[target] // the map that was just raced (the vote winner)
 assert(await waitFor(() => last(A).ph === 'lobby', 5000, 'lobby again'), 'lobby reopens after results')

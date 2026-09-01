@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { WebSocketServer } from 'ws'
 import { tracks, TOTAL_LAPS, MAX_PLAYERS } from './shared/track.js'
 import { Coordinator, RECONCILE_MS } from './coord.js'
+import { CAR_COLORS, CAR_STYLES, clampStyle, clampColor } from './shared/cars.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const PORT = +(process.env.PORT || 8765)
@@ -23,7 +24,6 @@ const TICK_MS = 50
 const REDIS_URL = process.env.REDIS_URL || ''
 const INSTANCE_ID = process.env.INSTANCE_ID || crypto.randomBytes(4).toString('hex')
 
-const COLORS = ['#e53935', '#1e88e5', '#43a047', '#fdd835', '#fb8c00', '#8e24aa', '#00acc1', '#ec407a', '#f5f5f5', '#546e7a', '#7cb342', '#ffb300', '#3949ab', '#d81b60']
 const NAMES = ['Flash', 'Turbo', 'Blitz', 'Rocket', 'Nova', 'Comet', 'Viper', 'Ghost', 'Storm', 'Pixel', 'Mach', 'Drift', 'Bolt', 'Zippy']
 const NAME_MAX = 14
 
@@ -37,9 +37,9 @@ function cleanName (raw) {
     .slice(0, NAME_MAX)
 }
 
-// A racer's name is frozen from the moment the grid locks (countdown) until
-// the results board clears; spectators can rename whenever they like.
-function nameLocked (c) {
+// A racer's name and car are frozen from the moment the grid locks (countdown)
+// until the results board clears; spectators can change them whenever they like.
+function customLocked (c) {
   return c.inRace && state.phase !== 'lobby'
 }
 
@@ -175,12 +175,13 @@ function broadcast (obj) {
   if (coord) coord.queueBcast(data)
 }
 
-function makeClient (ws, id, name, colorIdx, local, inst) {
+function makeClient (ws, id, name, colorIdx, local, inst, styleIdx = 0) {
   return {
     ws,
     id,
     name,
     colorIdx,
+    styleIdx,
     local,
     inst, // instance hosting the socket (null until a remote client is heard from)
     seen: Date.now(),
@@ -229,7 +230,8 @@ function finishRace () {
     pos: i + 1,
     id: c.id,
     name: c.name,
-    color: COLORS[c.colorIdx],
+    color: CAR_COLORS[c.colorIdx],
+    style: c.styleIdx,
     time: c.car.fin ? c.car.finT : 0,
     laps: c.car.lap
   }))
@@ -307,7 +309,8 @@ function tick () {
       id,
       si: i,
       n: c.name,
-      col: COLORS[c.colorIdx],
+      col: CAR_COLORS[c.colorIdx],
+      sty: c.styleIdx,
       x: +c.car.x.toFixed(2),
       z: +c.car.z.toFixed(2),
       a: +c.car.a.toFixed(3),
@@ -349,7 +352,7 @@ function handleMessage (c, m) {
     ws.send(JSON.stringify({ t: 'joined', ok: true, slot: c.slot }))
     console.log('[join]', c.name, 'slot', c.slot, 'roster', roster.length)
   } else if (m.t === 'name') {
-    if (nameLocked(c)) {
+    if (customLocked(c)) {
       ws.send(JSON.stringify({ t: 'named', ok: false, name: c.name, why: 'Names are locked once the race starts' }))
       return
     }
@@ -363,6 +366,19 @@ function handleMessage (c, m) {
       c.name = n
     }
     ws.send(JSON.stringify({ t: 'named', ok: true, name: c.name }))
+  } else if (m.t === 'car') {
+    if (customLocked(c)) {
+      ws.send(JSON.stringify({ t: 'car', ok: false, style: c.styleIdx, color: c.colorIdx, why: 'Your car is locked once the race starts' }))
+      return
+    }
+    const style = clampStyle(m.style)
+    const color = clampColor(m.color)
+    if (style !== c.styleIdx || color !== c.colorIdx) {
+      console.log('[car]', c.name, CAR_STYLES[style].id + '->' + CAR_COLORS[color])
+      c.styleIdx = style
+      c.colorIdx = color
+    }
+    ws.send(JSON.stringify({ t: 'car', ok: true, style: c.styleIdx, color: c.colorIdx }))
   } else if (m.t === 'leave') {
     if (!c.inRace || state.phase !== 'lobby') return
     dropFromRoster(c)
@@ -419,7 +435,7 @@ wss.on('connection', async ws => {
     try {
       const a = await coord.admit()
       id = a.id
-      colorIdx = a.colorRaw % COLORS.length
+      colorIdx = a.colorRaw % CAR_COLORS.length
       if (!coord.leader) view = a.meta || { ph: 'lobby', phaseEnds: null, track: track.name }
     } catch (e) {
       console.error('[coord] admit failed:', e.message)
@@ -429,10 +445,10 @@ wss.on('connection', async ws => {
     if (ws.readyState !== 1) return
   } else {
     id = nextId++
-    colorIdx = nextColor++ % COLORS.length
+    colorIdx = nextColor++ % CAR_COLORS.length
   }
   const name = NAMES[(id - 1) % NAMES.length] + '-' + String(100 + Math.floor(Math.random() * 900))
-  const c = makeClient(ws, id, name, colorIdx, true, INSTANCE_ID)
+  const c = makeClient(ws, id, name, colorIdx, true, INSTANCE_ID, 0)
   clients.set(id, c)
 
   const ph = view ? view.ph : state.phase
@@ -441,7 +457,9 @@ wss.on('connection', async ws => {
     t: 'init',
     id,
     name: c.name,
-    color: COLORS[c.colorIdx],
+    color: CAR_COLORS[c.colorIdx],
+    colorIdx: c.colorIdx,
+    styleIdx: c.styleIdx,
     nameMax: NAME_MAX,
     laps: TOTAL_LAPS,
     maxPlayers: MAX_PLAYERS,
@@ -515,7 +533,7 @@ function metaSnapshot () {
     votes: [...state.votes],
     voteClosed: state.voteClosed,
     roster: roster.map(id => clients.get(id)).filter(Boolean)
-      .map(c => ({ id: c.id, name: c.name, colorIdx: c.colorIdx, slot: c.slot, moved: c.moved, car: c.car }))
+      .map(c => ({ id: c.id, name: c.name, colorIdx: c.colorIdx, styleIdx: c.styleIdx, slot: c.slot, moved: c.moved, car: c.car }))
   }
 }
 
@@ -571,10 +589,12 @@ function becomeLeader (meta) {
   for (const r of meta.roster) {
     let c = clients.get(r.id)
     if (!c) {
-      c = makeClient(remoteWs(r.id), r.id, r.name, r.colorIdx, false, null)
+      c = makeClient(remoteWs(r.id), r.id, r.name, clampColor(r.colorIdx), false, null, clampStyle(r.styleIdx))
       clients.set(r.id, c)
     }
     c.name = r.name
+    if (r.colorIdx !== undefined) c.colorIdx = clampColor(r.colorIdx)
+    c.styleIdx = clampStyle(r.styleIdx)
     c.inRace = true
     c.slot = r.slot
     c.moved = r.moved
@@ -588,11 +608,11 @@ function stopLeading () {
   roster = []
 }
 
-function onCmd ({ inst, id, name, colorIdx, m }) {
+function onCmd ({ inst, id, name, colorIdx, styleIdx, m }) {
   let c = clients.get(id)
   if (!c) {
     if (m.t === 'close') return
-    c = makeClient(remoteWs(id), id, cleanName(name) || 'Racer-' + id, (+colorIdx | 0) % COLORS.length, false, inst)
+    c = makeClient(remoteWs(id), id, cleanName(name) || 'Racer-' + id, clampColor(colorIdx), false, inst, clampStyle(styleIdx))
     clients.set(id, c)
   }
   if (!c.local) {
@@ -617,11 +637,15 @@ function onReply (to, str) {
   const c = clients.get(to)
   if (!c || !c.local) return
   if (c.ws.readyState === 1) c.ws.send(str)
-  // Keep the follower's copy of the name current so a re-announce after a
-  // leader change carries the chosen name, not the random one.
+  // Keep the follower's copy of the name and car current so a re-announce
+  // after a leader change carries the chosen ones, not the defaults.
   try {
     const m = JSON.parse(str)
     if (m.t === 'named' && m.ok) c.name = m.name
+    else if (m.t === 'car' && m.ok) {
+      c.styleIdx = clampStyle(m.style)
+      c.colorIdx = clampColor(m.color)
+    }
   } catch {}
 }
 

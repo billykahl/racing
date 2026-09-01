@@ -168,16 +168,18 @@ html, body {
 #nameInput:disabled { opacity: 0.6; cursor: default; }
 
 /* ---- lobby map vote ---- */
+/* Map vote card: mirrors the garage card on the other side so the car on the grid stays in view. */
 #mapVote {
   display: none;
-  margin: 0 auto 14px;
-  padding: 10px 12px 8px;
-  max-width: 560px;
-  background: rgba(10, 12, 16, 0.62);
+  position: absolute;
+  right: calc(100% + 28px);
+  bottom: calc(180px - 9vh); /* clears the minimap (14px + 160px) regardless of viewport height; #joinWrap sits at bottom: 9% */
+  width: 300px;
+  padding: 12px 14px 12px;
+  background: rgba(0, 0, 0, 0.45);
   border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 12px;
+  border-radius: 16px;
   backdrop-filter: blur(6px);
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
 }
 
 #mapVoteTitle {
@@ -190,7 +192,7 @@ html, body {
 
 #mapVoteGrid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -274,6 +276,107 @@ html, body {
 #joinBtn:hover:not(:disabled) { transform: scale(1.05); filter: brightness(1.1); }
 #joinBtn:active:not(:disabled) { transform: scale(0.97); }
 #joinBtn:disabled { background: linear-gradient(180deg, #4c554d, #39423b); cursor: default; opacity: 0.9; box-shadow: none; }
+
+/* Garage card: sits beside the join panel so the car on the grid stays in view. */
+#carRow {
+  position: absolute;
+  left: calc(100% + 28px);
+  bottom: 0;
+  width: 232px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px 16px;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 16px;
+  backdrop-filter: blur(6px);
+}
+
+@media (max-width: 900px) {
+  #mapVote {
+    position: static;
+    width: auto;
+    max-width: 92vw;
+    margin: 0 auto 14px;
+  }
+  #mapVoteGrid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  #carRow {
+    position: static;
+    width: auto;
+    max-width: 92vw;
+    margin-bottom: 14px;
+    background: none;
+    border: none;
+    padding: 0;
+    backdrop-filter: none;
+  }
+}
+
+#carRow .carLabel {
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 2px;
+  opacity: 0.85;
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.8);
+}
+
+#styleRow, #colorRow {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 6px;
+}
+
+#colorRow { max-width: 232px; }
+#styleRow { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; width: 100%; }
+
+.styleBtn {
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.45);
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-radius: 999px;
+  padding: 6px 10px;
+  cursor: pointer;
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.8);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease, transform 0.08s ease;
+}
+
+.styleBtn:hover:not(:disabled) { background: rgba(40, 44, 52, 0.7); }
+.styleBtn:active:not(:disabled) { transform: scale(0.96); }
+.styleBtn.sel {
+  color: #ffd54f;
+  border-color: #ffd54f;
+  background: rgba(255, 213, 79, 0.16);
+  box-shadow: 0 0 14px rgba(255, 213, 79, 0.35);
+}
+
+.swatch {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.5), inset 0 -3px 5px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+  padding: 0;
+  transition: transform 0.1s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.swatch:hover:not(:disabled) { transform: scale(1.1); }
+.swatch.sel {
+  border-color: #ffd54f;
+  transform: scale(1.2);
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.6), 0 0 14px rgba(255, 213, 79, 0.6), inset 0 -3px 5px rgba(0, 0, 0, 0.3);
+}
+
+.styleBtn:disabled, .swatch:disabled { opacity: 0.5; cursor: default; }
 
 #joinMsg { margin-top: 8px; font-size: 15px; font-weight: 600; min-height: 20px; text-shadow: 0 2px 8px rgba(0,0,0,0.8); }
 
