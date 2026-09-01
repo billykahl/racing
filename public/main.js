@@ -534,10 +534,10 @@ function loadTrack (name) {
 // ---------- input ----------
 const keys = {}
 const KEYMAP = {
-  ArrowLeft: 'left', ArrowRight: 'right', KeyA: 'left',
+  ArrowLeft: 'left', ArrowRight: 'right', KeyA: 'left', KeyD: 'right',
   KeyW: 'boost', ShiftLeft: 'boost', ShiftRight: 'boost', ArrowUp: 'boost',
   KeyS: 'brake', ArrowDown: 'brake',
-  KeyD: 'drift', Space: 'drift'
+  Space: 'drift'
 }
 addEventListener('keydown', e => {
   if (e.target && (e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT')) return
