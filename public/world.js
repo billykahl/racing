@@ -393,15 +393,23 @@ export class World {
     const inX2 = this.x0 + (this.cols - 1) * CELL - 10
     const inZ1 = this.z0 + 10
     const inZ2 = this.z0 + (this.rows - 1) * CELL - 10
+    // Lowest point of the detailed heightfield (track carving and ponds
+    // included). The coarse mesh samples terrainBase, which near the road
+    // can sit well above the carved heightfield, so a fixed offset is not
+    // enough to keep it hidden.
+    let minH = Infinity
+    for (const v of this.h) if (v < minH) minH = v
     for (let iz = 0; iz <= N; iz++) {
       for (let ix = 0; ix <= N; ix++) {
         const k = iz * (N + 1) + ix
         const x = cx + (ix / N - 0.5) * FAR * 2
         const z = cz + (iz / N - 0.5) * FAR * 2
         let h = this.terrainBase(x, z)
-        // Tuck the coarse mesh under the detailed one where they overlap.
+        // Tuck the coarse mesh under the detailed one where they overlap:
+        // drop it below the lowest detailed vertex so it never rises
+        // through the road.
         const inside = x > inX1 && x < inX2 && z > inZ1 && z < inZ2
-        if (inside) h -= 6
+        if (inside) h = Math.min(h, minH) - 8
         const e = 12
         const hx = (this.terrainBase(x + e, z) - this.terrainBase(x - e, z)) / (2 * e)
         const hz = (this.terrainBase(x, z + e) - this.terrainBase(x, z - e)) / (2 * e)
