@@ -21,11 +21,12 @@ run on another port. Chrome, Edge, Safari 17+ and Firefox with WebGL2 work.
 
 ## Deploy to Vercel (Docker)
 
-`Dockerfile.vercel` is auto-detected by Vercel and runs the whole game (static
-files + WebSocket server) as one container function listening on `$PORT`.
-Connect the repo in Vercel and deploy; no `vercel.json` is needed. With Docker
-installed, `vercel dev` runs the same container locally, or build and run it by
-hand:
+`Dockerfile.vercel` runs the whole game (static files + WebSocket server) as
+one container function listening on `$PORT`. `vercel.json` declares the whole
+repo as a single container service built from `Dockerfile.vercel` and routes
+every path to it, so Vercel does not fall back to serving `public/` as a static
+site. Connect the repo in Vercel and deploy. With Docker installed, `vercel dev`
+runs the same container locally, or build and run it by hand:
 
 ```sh
 docker build -f Dockerfile.vercel -t vibe-racing . && docker run --rm -p 8765:80 vibe-racing
