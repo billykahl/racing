@@ -6,11 +6,14 @@
 // is a FOLLOWER: it accepts WebSockets, hands out globally unique ids, and
 // relays messages both ways over three pub/sub channels:
 //
-//   race:cmd    follower -> leader   {inst, b: [{id, name, colorIdx, m}, ...]} where m is a
-//                                     client message or a synthetic {t:'hello'} / {t:'close'};
+//   race:cmd    follower -> leader   {inst, b: [{id, name, colorIdx, styleIdx, m}, ...]} where m
+//                                     is a client message or a synthetic {t:'hello'} / {t:'close'};
+//                                     name/colorIdx/styleIdx are the follower's copy of the
+//                                     client's customisation, used when the leader first hears
+//                                     of the client (later changes arrive as {t:'name'}/{t:'car'});
 //                                     a follower batches everything it hears into one
 //                                     publish per FLUSH_MS. Plus {inst, t:'ping'} presence beats.
-//   race:reply  leader -> follower   {to: id, msg: <raw JSON string>}  (joined/named/left)
+//   race:reply  leader -> follower   {to: id, msg: <raw JSON string>}  (joined/named/car/left)
 //   race:bcast  leader -> followers  <raw JSON string> (snap/map), relayed verbatim
 //
 // Keys:
@@ -130,7 +133,7 @@ export class Coordinator {
 
   // ----- follower side -----
   forward (c, m) {
-    this.outbox.push({ id: c.id, name: c.name, colorIdx: c.colorIdx, m })
+    this.outbox.push({ id: c.id, name: c.name, colorIdx: c.colorIdx, styleIdx: c.styleIdx, m })
     if (!this.flushTimer) this.flushTimer = setTimeout(() => this.flush(), FLUSH_MS)
   }
 
@@ -281,7 +284,7 @@ export class Coordinator {
     if (typeof m.inst === 'string' && m.inst !== this.inst) this.peers.set(m.inst, Date.now())
     if (m.t === 'ping' || !Array.isArray(m.b)) return
     for (const e of m.b) {
-      if (e && typeof e.id === 'number' && e.m && typeof e.m === 'object') this.h.onCmd({ inst: m.inst, id: e.id, name: e.name, colorIdx: e.colorIdx, m: e.m })
+      if (e && typeof e.id === 'number' && e.m && typeof e.m === 'object') this.h.onCmd({ inst: m.inst, id: e.id, name: e.name, colorIdx: e.colorIdx, styleIdx: e.styleIdx, m: e.m })
     }
   }
 

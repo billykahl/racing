@@ -87,6 +87,13 @@ in the moment the countdown starts. Every rival's car carries a floating label
 with their name and, once the race is on, their current place (`1st`, `2nd`,
 …). Your own car never shows a label; your place is in the panel top right.
 
+The join panel also lets you pick a car: one of four body styles (**Racer**,
+**Muscle**, **Buggy**, **Van**) and one of 14 paint colours. The choice is
+remembered for next time, can be changed freely in the lobby, even after
+joining, and locks in the moment the countdown starts; everyone sees each
+racer in the style and colour they picked. Colours are not exclusive, so two
+racers can share one.
+
 ## Controls
 
 | Key | Action |
