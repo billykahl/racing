@@ -8,7 +8,8 @@ const PORT = 8799
 const URL = 'ws://localhost:' + PORT
 let failures = 0
 const server = spawn(process.execPath, ['server.js'], {
-  env: { ...process.env, PORT, LOBBY_SEC: 2, COUNTDOWN_SEC: 1, RESULTS_SEC: 2, GRACE_SEC: 3, HARD_CAP_SEC: 4 },
+  // VOTE_CLOSE_SEC is clamped to 40% of LOBBY_SEC, so the vote closes 0.8 s before the countdown.
+  env: { ...process.env, PORT, LOBBY_SEC: 2, COUNTDOWN_SEC: 1, RESULTS_SEC: 2, GRACE_SEC: 3, HARD_CAP_SEC: 4, VOTE_CLOSE_SEC: 1 },
   stdio: ['ignore', 'pipe', 'inherit']
 })
 server.stdout.on('data', d => process.stdout.write('[server] ' + d))
@@ -24,11 +25,12 @@ function assert (cond, msg) {
 }
 
 function mkClient (label) {
-  const c = { label, ws: new WebSocket(URL), snaps: [], joins: [], inits: [], maps: [], named: [] }
+  const c = { label, ws: new WebSocket(URL), snaps: [], joins: [], inits: [], maps: [], named: [], voted: [] }
   c.ws.on('message', raw => {
     const m = JSON.parse(raw.toString())
     if (m.t === 'init') c.inits.push(m)
     else if (m.t === 'named') c.named.push(m)
+    else if (m.t === 'voted') c.voted.push(m)
     else if (m.t === 'map') c.maps.push(m.name)
     else if (m.t === 'joined') c.joins.push(m)
     else if (m.t === 'snap') c.snaps.push(m)
@@ -67,6 +69,29 @@ assert(tracks.some(t => t.name === A.inits[0].mapName), 'init names a known map'
 await waitFor(() => last(A) && last(A).ph === 'lobby', 2000, 'lobby snap')
 assert(last(A).tl === -1, 'lobby waits (no countdown) until someone joins')
 
+// Map vote: open while the lobby waits, one vote per client (latest wins), tally in every lobby snap.
+const mapList = A.inits[0].maps
+assert(Array.isArray(mapList) && mapList.length === tracks.length && mapList.every((n, i) => n === tracks[i].name), 'init lists every map in track order')
+assert(Array.isArray(A.inits[0].votes) && A.inits[0].voteOpen === true && mapList[A.inits[0].mapIdx] === A.inits[0].mapName, 'init carries an open, empty tally and the current map index')
+assert(last(A).voteOpen === true && last(A).votes.every(n => n === 0), 'lobby snap says voting is open with no votes yet')
+const curIdx = A.inits[0].mapIdx
+const others = mapList.map((_, i) => i).filter(i => i !== curIdx)
+const target = others[0]
+const alt = others[1 % others.length]
+send(A, { t: 'vote', map: alt })
+assert(await waitFor(() => A.voted.length === 1, 2000, 'A voted'), 'vote answered')
+assert(A.voted[0].ok && A.voted[0].map === alt, 'vote accepted for ' + mapList[alt])
+assert(await waitFor(() => last(A).votes[alt] === 1, 2000, 'tally'), 'snap tally counts the vote')
+send(A, { t: 'vote', map: mapList[target] })
+assert(await waitFor(() => A.voted.length === 2 && A.voted[1].ok && A.voted[1].map === target, 2000, 'A revoted'), 'voting by name works and is answered')
+assert(await waitFor(() => last(A).votes[target] === 1 && last(A).votes[alt] === 0, 2000, 'replaced'), 'a second vote replaces the first (client still counts once)')
+send(B, { t: 'vote', map: target })
+assert(await waitFor(() => B.voted.length === 1 && B.voted[0].ok, 2000, 'B voted'), 'B vote accepted')
+assert(await waitFor(() => last(A).votes[target] === 2, 2000, 'two votes'), 'tally shows two votes for ' + mapList[target])
+send(A, { t: 'vote', map: 999 })
+assert(await waitFor(() => A.voted.length === 3, 2000, 'bad vote'), 'out-of-range vote answered')
+assert(A.voted[2].ok === false && last(A).votes.reduce((a, b) => a + b, 0) === 2, 'out-of-range vote refused and does not change the tally')
+
 // Naming: free in the lobby, sanitised, and frozen once the grid locks.
 const carOf = (c, who) => last(c).cars.find(x => x.id === who.inits[0].id)
 send(A, { t: 'name', name: '  <b>Speedy</b>   McGee-the-Fastest ' })
@@ -90,10 +115,21 @@ send(B, { t: 'join' })
 assert(await waitFor(() => B.joins.length === 1 && B.joins[0].ok, 2000, 'B joined'), 'B join accepted')
 
 assert(await waitFor(() => last(A).ph === 'countdown' && last(A).cars.length === 2, 5000, 'countdown'), 'countdown phase with a locked grid of 2')
+{
+  const lobbySnaps = A.snaps.filter(s => s.ph === 'lobby')
+  const closing = lobbySnaps[lobbySnaps.length - 1]
+  assert(A.maps.length >= 1 && A.maps[A.maps.length - 1] === mapList[target], 'voting closed and the map broadcast names the winner: ' + A.maps[A.maps.length - 1])
+  assert(closing.voteOpen === false && closing.votes[target] === 2 && closing.mapIdx === target, 'last lobby snap: voting closed, tally kept, mapIdx points at the winner')
+  assert(lobbySnaps.some(s => s.voteOpen === false && s.tl > 0.5), 'voting closed before the countdown ended')
+  assert(last(A).votes === undefined && last(A).voteOpen === undefined, 'vote fields are omitted outside the lobby')
+}
 send(B, { t: 'join' })
 await sleep(100)
 assert(B.joins.length === 2 && B.joins[1].ok === false, 'joining during countdown is rejected')
 assert(await waitFor(() => last(A).ph === 'racing', 4000, 'racing'), 'racing phase begins')
+send(A, { t: 'vote', map: alt })
+assert(await waitFor(() => A.voted.length === 4, 2000, 'race vote'), 'vote during the race answered')
+assert(A.voted[3].ok === false && /lobby/.test(A.voted[3].why), 'vote outside the lobby is refused: ' + A.voted[3].why)
 send(A, { t: 'name', name: 'TooLate' })
 assert(await waitFor(() => A.named.length === 5, 2000, 'locked rename'), 'rename during the race answered')
 assert(A.named[4].ok === false && A.named[4].name === 'StillLobby' && carOf(A, A).n === 'StillLobby', 'name is locked once the race starts')
@@ -119,10 +155,11 @@ const res = last(A).res
 assert(res && res.length === 2 && res[0].id === A.inits[0].id && res[0].time > 0, 'winner ranked first with a time')
 assert(res[1].id === B.inits[0].id && res[1].time === 0, 'unfinished racer listed as DNF')
 
-const firstMap = A.inits[0].mapName
+const firstMap = mapList[target] // the map that was just raced (the vote winner)
 assert(await waitFor(() => last(A).ph === 'lobby', 5000, 'lobby again'), 'lobby reopens after results')
 await sleep(100)
-assert(A.maps.length >= 1 && A.maps[A.maps.length - 1] !== firstMap, 'map rotated: ' + firstMap + ' -> ' + A.maps[A.maps.length - 1])
+assert(A.maps.length >= 2 && A.maps[A.maps.length - 1] !== firstMap, 'map rotated: ' + firstMap + ' -> ' + A.maps[A.maps.length - 1])
+assert(last(A).voteOpen === true && last(A).votes.every(n => n === 0), 'new lobby reopens the vote with a clean tally')
 const ids = last(A).cars.map(c => c.id)
 assert(ids.includes(A.inits[0].id) && ids.includes(B.inits[0].id), 'racers who drove are kept on the grid for the next race')
 assert(last(A).cars.every(c => c.l === 0 && c.fin === 0), 'cars reset to lap 0 on the grid')
