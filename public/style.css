@@ -167,6 +167,96 @@ html, body {
 #nameInput.bad { border-color: #ef5350; }
 #nameInput:disabled { opacity: 0.6; cursor: default; }
 
+/* ---- lobby map vote ---- */
+#mapVote {
+  display: none;
+  margin: 0 auto 14px;
+  padding: 10px 12px 8px;
+  max-width: 560px;
+  background: rgba(10, 12, 16, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 12px;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+}
+
+#mapVoteTitle {
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 2px;
+  opacity: 0.85;
+  margin-bottom: 8px;
+}
+
+#mapVoteGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.mapTile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 6px 5px;
+  font: inherit;
+  color: #f2f4f2;
+  background: rgba(0, 0, 0, 0.45);
+  border: 2px solid rgba(255, 255, 255, 0.18);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.08s ease;
+}
+
+.mapTile:hover:not(:disabled) { border-color: rgba(255, 255, 255, 0.5); transform: translateY(-1px); }
+.mapTile:disabled { cursor: default; opacity: 0.55; }
+.mapTile.lead { border-color: rgba(255, 213, 79, 0.55); }
+.mapTile.mine { border-color: #ffd54f; box-shadow: 0 0 16px rgba(255, 213, 79, 0.35); }
+.mapTile.win { border-color: #38c956; box-shadow: 0 0 18px rgba(56, 201, 86, 0.45); opacity: 1; }
+
+.mapTile canvas {
+  width: 104px;
+  height: 64px;
+  max-width: 100%;
+  border-radius: 6px;
+  display: block;
+}
+
+.mapTile .mapName {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.mapTile .mapCount {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  min-width: 20px;
+  padding: 1px 6px;
+  font-size: 11px;
+  font-weight: 800;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.7);
+  color: #ffd54f;
+}
+
+.mapTile .mapCount:empty { display: none; }
+
+#mapVoteStatus {
+  margin-top: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 0.85;
+  min-height: 14px;
+}
+
 #joinBtn {
   font-size: 26px;
   font-weight: 800;
@@ -333,6 +423,8 @@ html, body {
 #overlay .box { font-size: 22px; font-weight: 700; letter-spacing: 1px; }
 
 @media (max-width: 720px) {
+  #mapVoteGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .mapTile canvas { width: 92px; height: 56px; }
   #standings { display: none; }
   #hint { display: none; }
   #minimap { width: 160px; height: 106px; }
