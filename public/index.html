@@ -56,12 +56,12 @@
     <path id="gaugeArc" d="M20 105 A85 85 0 0 1 180 105" fill="none" stroke="#ffd54f" stroke-width="10" stroke-linecap="round" stroke-dasharray="267" stroke-dashoffset="267"/>
   </svg>
   <div id="speedVal">0</div><div id="speedUnit">km/h</div></div>
-  <div id="boostWrap"><div id="boostBar"></div><span>BOOST · W</span></div>
+  <div id="boostWrap"><div id="boostBar"></div><span>BOOST · SHIFT</span></div>
 </div>
 
 <canvas id="minimap" width="240" height="160"></canvas>
 
-<div id="hint">← → / A D steer &middot; W boost &middot; S brake &middot; SPACE drift &middot; R rescue &middot; C camera &middot; X look back</div>
+<div id="hint">← → / A D steer &middot; W / ↑ accelerate &middot; SHIFT boost &middot; S brake &middot; SPACE drift &middot; R rescue &middot; C camera &middot; X look back</div>
 
 <div id="controls">
   <select id="quality" title="Graphics quality">
@@ -74,6 +74,8 @@
 </div>
 
 <div id="fps"></div>
+
+<div id="modeWarn">⚠ Server has no REDIS_URL — this instance runs its own lobby, players may land in different races</div>
 
 <div id="overlay"><div class="box" id="overlayMsg">Loading track&hellip;</div></div>
 

@@ -40,6 +40,7 @@ const elQuality = $('quality')
 const elMute = $('muteBtn')
 const elLeave = $('leaveBtn')
 const elFps = $('fps')
+const elModeWarn = $('modeWarn')
 
 // ---------- quality ----------
 const QUALITY = {
@@ -156,6 +157,8 @@ let clock = 0
 let res = null
 let carsSnap = []
 let sorted = []
+let who = [] // everyone on the site, from the server's `who` broadcast
+let serverInfo = null // { shared, inst, leader } from `init`
 let standingsDirty = true
 let mapName = ''
 let track = null
@@ -327,6 +330,7 @@ function connect () {
     for (const r of remote.values()) removeRemote(r)
     remote.clear()
     carsSnap = []
+    who = []
     standingsDirty = true
     myVote = -1
     voteOpen = false
@@ -477,10 +481,19 @@ function handle (m) {
     graceSec = m.graceSec
     phase = m.ph
     tl = m.tl
+    serverInfo = { shared: !!m.shared, inst: m.inst || '', leader: !!m.leader }
+    // Local dev runs one process by design; anywhere else an unshared server
+    // means every instance has its own lobby, which the player should know.
+    const local = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname)
+    elModeWarn.style.display = !serverInfo.shared && !local ? 'block' : 'none'
+    standingsDirty = true
     myVote = -1
     buildVoteTiles(m.maps || [])
     applyVoteSnap(m)
     loadTrack(m.mapName)
+  } else if (m.t === 'who') {
+    who = Array.isArray(m.list) ? m.list : []
+    standingsDirty = true
   } else if (m.t === 'map') {
     loadTrack(m.name)
   } else if (m.t === 'voted') {
@@ -629,7 +642,7 @@ function spawnOwn (slot) {
   const n = track.nearest(g.x, g.z, -1)
   own = {
     x: g.x, z: g.z, y: g.y, a: g.a, vx: 0, vz: 0, idx: n.idx, lap: 0, prog: n.prog, prevProg: n.prog, cpHalf: false, fin: false,
-    steer: 0, boost: 1, boostOn: false, boostCd: 0, drifting: false, driftDir: 0, driftT: 0, driftRamp: 0, turbo: 0, slipVis: 0, fwd: 0, lat: 0, off: false, shoulder: false,
+    steer: 0, boost: 1, boostOn: false, boostCd: 0, boostT: 0, drifting: false, driftDir: 0, driftT: 0, driftRamp: 0, turbo: 0, slipVis: 0, fwd: 0, lat: 0, off: false, shoulder: false,
     normal: new THREE.Vector3(0, 1, 0), quat: new THREE.Quaternion(), hitCool: 0, lastSkidL: null, lastSkidR: null, moved: false, slot
   }
   ownCar = new Car(me.color, me.name, true, me.style)
@@ -642,7 +655,7 @@ function spawnOwn (slot) {
 function respawnOwn (slot) {
   const g = track.gridPose(slot)
   const n = track.nearest(g.x, g.z, -1)
-  Object.assign(own, { x: g.x, z: g.z, y: g.y, a: g.a, vx: 0, vz: 0, idx: n.idx, lap: 0, prog: n.prog, prevProg: n.prog, cpHalf: false, fin: false, boost: 1, boostOn: false, boostCd: 0, drifting: false, driftDir: 0, driftT: 0, driftRamp: 0, turbo: 0, fwd: 0, lat: 0 })
+  Object.assign(own, { x: g.x, z: g.z, y: g.y, a: g.a, vx: 0, vz: 0, idx: n.idx, lap: 0, prog: n.prog, prevProg: n.prog, cpHalf: false, fin: false, boost: 1, boostOn: false, boostCd: 0, boostT: 0, drifting: false, driftDir: 0, driftT: 0, driftRamp: 0, turbo: 0, fwd: 0, lat: 0 })
   boostPress = false
   camReset = true
 }
@@ -794,7 +807,8 @@ const keys = {}
 let boostPress = false
 const KEYMAP = {
   ArrowLeft: 'left', ArrowRight: 'right', KeyA: 'left', KeyD: 'right',
-  KeyW: 'boost', ShiftLeft: 'boost', ShiftRight: 'boost', ArrowUp: 'boost',
+  KeyW: 'accel', ArrowUp: 'accel',
+  ShiftLeft: 'boost', ShiftRight: 'boost',
   KeyS: 'brake', ArrowDown: 'brake',
   Space: 'drift'
 }
@@ -892,7 +906,9 @@ elLeave.addEventListener('click', () => {
 })
 
 // ---------- physics ----------
-const P = { top: 46, boostTop: 63, accel: 21, brake: 34, reverse: 8, offTop: 21 }
+// boostTop is the top speed the instant boost starts; boostRamp adds m/s to it for every second Shift stays held,
+// so a full-meter hold (~2.8s) ends near ~94 m/s and is still climbing when the meter runs dry.
+const P = { top: 46, boostTop: 55, boostRamp: 14, accel: 21, brake: 34, reverse: 8, offTop: 21 }
 const tmpN = new THREE.Vector3()
 const tmpF = new THREE.Vector3()
 const tmpR = new THREE.Vector3()
@@ -908,7 +924,8 @@ function step (dt) {
   own.steer += (st - own.steer) * Math.min(1, dt * 10)
   const brake = racing && !!keys.brake
   const driftKey = racing && !!keys.drift
-  const throttle = racing && !brake ? 1 : 0
+  // No auto-acceleration: the car only drives forward while W / Up is held, otherwise it coasts under drag.
+  const throttle = racing && !brake && keys.accel ? 1 : 0
 
   const hx = Math.cos(own.a)
   const hz = Math.sin(own.a)
@@ -934,10 +951,15 @@ function step (dt) {
   if (own.boostOn && (!racing || !keys.boost || own.boost <= 0.02)) {
     own.boostOn = false
     own.boostCd = 1.0
+    own.boostT = 0
   }
   if (!own.boostOn && press && racing && keys.boost && own.boostCd <= 0 && own.boost >= 0.5) own.boostOn = true
   const wantBoost = own.boostOn && fwd > 2
-  if (wantBoost) own.boost = Math.max(0, own.boost - dt * 0.36)
+  // boostT is how long the current boost has been pulling; the ramp below grows with it and never plateaus.
+  if (wantBoost) {
+    own.boost = Math.max(0, own.boost - dt * 0.36)
+    own.boostT += dt
+  }
   else if (!own.boostOn) own.boost = Math.min(1, own.boost + dt * (own.drifting && own.driftDir !== 0 ? 0.18 : 0.055))
   own.boosting = wantBoost
   own.turbo = Math.max(0, own.turbo - dt)
@@ -946,8 +968,8 @@ function step (dt) {
   let top = P.top
   let acc = P.accel
   if (wantBoost) {
-    top = P.boostTop
-    acc += 24
+    top = P.boostTop + P.boostRamp * own.boostT
+    acc += 24 + 12 * own.boostT
   }
   if (turbo) {
     top += 9
@@ -956,7 +978,8 @@ function step (dt) {
   if (off) top = Math.min(top, P.offTop)
   else if (own.shoulder) top *= 0.92
 
-  if (throttle) {
+  // Boost is its own thrust: it pushes the car even without the accel key (but never against the brake).
+  if (throttle || (wantBoost && !brake)) {
     if (fwd < top) fwd += acc * (1 - Math.max(0, fwd) / top * 0.55) * dt
   }
   if (brake) {
@@ -1453,17 +1476,41 @@ function fmtClock (ms) {
   return m + ':' + (r < 10 ? '0' : '') + r.toFixed(1)
 }
 
+// The top-left panel lists everyone on the site: racers in race order (from
+// the snapshot), then spectators (from the `who` list).
+function nameCell (n, self) {
+  const t = self ? '<b>' + esc(n) + '</b><span class="you">(you)</span>' : esc(n)
+  return '<span class="nm">' + t + '</span>'
+}
+
 function rebuildStandings () {
   sorted = [...carsSnap].sort((A, B) => (B.fin - A.fin) || ((B.l + B.p) - (A.l + A.p)))
   let html = ''
   const showPlace = phase === 'racing' || phase === 'finished'
+  if (who.length) {
+    const tag = serverInfo ? (serverInfo.shared ? '\u{1F310} shared' : '1 server') : ''
+    const inst = serverInfo ? esc(serverInfo.inst) : ''
+    html += `<div class="hdr"><span>ONLINE · ${who.length}</span><span class="srv" title="instance ${inst}">${tag}</span></div>`
+  }
+  const racing = new Set()
   sorted.forEach((c, i) => {
+    racing.add(c.id)
     const self = me && c.id === me.id
-    html += `<div class="row${self ? ' self' : ''}"><span class="pos">${i + 1}</span><span class="chip" style="background:${c.col}"></span><span class="nm">${self ? '<b>' + esc(c.n) + '</b>' : esc(c.n)}</span><span class="lp">${c.fin ? '\u{1F3C1}' : 'L' + Math.min(c.l + 1, LAPS)}</span></div>`
+    let lp
+    if (phase === 'lobby') lp = 'on grid'
+    else if (phase === 'countdown') lp = 'ready'
+    else if (phase === 'finished') lp = c.fin ? '\u{1F3C1}' : 'DNF'
+    else lp = c.fin ? '\u{1F3C1}' : 'L' + Math.min(c.l + 1, LAPS)
+    html += `<div class="row${self ? ' self' : ''}"><span class="pos">${i + 1}</span><span class="chip" style="background:${c.col}"></span>${nameCell(c.n, self)}<span class="lp">${lp}</span></div>`
     // Place badge over every rival's car (our own car never carries a label).
     const r = remote.get(c.id)
     if (r && r.car) r.car.setLabel(c.n, showPlace ? i + 1 : 0)
   })
+  for (const w of who) {
+    if (w.st !== 'spec' || racing.has(w.id)) continue
+    const self = me && w.id === me.id
+    html += `<div class="row spec${self ? ' self' : ''}"><span class="pos">\u{1F441}</span><span class="chip" style="background:${esc(w.col)}"></span>${nameCell(w.n, self)}<span class="lp">watching</span></div>`
+  }
   elStand.innerHTML = html
 }
 
@@ -1503,11 +1550,11 @@ function hud (dt) {
     if (voteOpen) sm += ' • vote for the next map'
   } else if (phase === 'countdown') {
     pm = ''
-    sm = joined ? 'Lights out and away we go…' : 'Spectating — next race opens after this one'
+    sm = joined ? 'Lights out and away we go…' : 'Grid is locked — ' + n + ' racing · spectating'
   } else if (phase === 'racing') {
     if (!joined) {
       pm = 'RACE IN PROGRESS'
-      sm = 'Spectating the leader — the next lobby opens when this race ends'
+      sm = 'Race in progress — ' + n + ' racing · you can join the next lobby'
     } else if (gl >= 0 && own && !own.fin) {
       pm = 'LEADER FINISHED — ' + Math.ceil(gl) + 's LEFT'
       sm = 'Finish before the timer runs out!'
@@ -1622,7 +1669,7 @@ function tick (dt, render) {
         ws.send(JSON.stringify({ t: 'st', q: [+own.x.toFixed(2), +own.z.toFixed(2), +own.a.toFixed(3), own.lap, +own.prog.toFixed(4), +own.fwd.toFixed(1), flags] }))
       }
     }
-    audio.engine(own.fwd, phase === 'racing' && !own.fin && !keys.brake ? 1 : 0, own.drifting ? 1 : Math.min(1, Math.abs(own.lat) / 8), own.off ? 1 : 0, own.boosting ? 1 : own.turbo > 0 ? 0.5 : 0, true)
+    audio.engine(own.fwd, phase === 'racing' && !own.fin && !keys.brake && keys.accel ? 1 : 0, own.drifting ? 1 : Math.min(1, Math.abs(own.lat) / 8), own.off ? 1 : 0, own.boosting ? 1 : own.turbo > 0 ? 0.5 : 0, true)
   } else {
     audio.engine(0, 0, 0, 0, 0, false)
   }

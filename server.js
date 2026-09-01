@@ -19,10 +19,14 @@ const HARD_CAP_SEC = +(process.env.HARD_CAP_SEC || 300)
 // test timers still leave a voting window.
 const VOTE_CLOSE_SEC = Math.min(+(process.env.VOTE_CLOSE_SEC || 8), LOBBY_SEC * 0.4)
 const TICK_MS = 50
-// With REDIS_URL set, every instance sharing that Redis presents one lobby
+// With a Redis URL set, every instance sharing that Redis presents one lobby
 // (see coord.js). Unset: this process is the whole world, all in memory.
-const REDIS_URL = process.env.REDIS_URL || ''
+// Marketplace add-ons expose the URL under different names; take the first set.
+const REDIS_VARS = ['REDIS_URL', 'KV_URL', 'UPSTASH_REDIS_URL', 'REDIS_TLS_URL', 'REDIS_PRIVATE_URL']
+const REDIS_VAR = REDIS_VARS.find(k => process.env[k]) || null
+const REDIS_URL = REDIS_VAR ? process.env[REDIS_VAR] : ''
 const INSTANCE_ID = process.env.INSTANCE_ID || crypto.randomBytes(4).toString('hex')
+const STARTED = Date.now()
 
 const NAMES = ['Flash', 'Turbo', 'Blitz', 'Rocket', 'Nova', 'Comet', 'Viper', 'Ghost', 'Storm', 'Pixel', 'Mach', 'Drift', 'Bolt', 'Zippy']
 const NAME_MAX = 14
@@ -75,9 +79,54 @@ function serveFrom (root, rel, res) {
   })
 }
 
+// Operational view of this instance: is the world shared, who runs it, and
+// what it looks like from here. A follower holds no state of its own, so it
+// reads the leader's last written state from Redis (authoritative: false).
+async function health () {
+  const leader = !coord || coord.leader
+  const local = [...clients.values()].filter(c => c.local)
+  const rosterIds = new Set(roster)
+  let ph = state.phase
+  let ends = state.phaseEnds
+  let trk = track.name
+  if (!leader) {
+    const meta = await coord.readMeta()
+    ph = meta ? meta.ph : null
+    ends = meta ? meta.phaseEnds : null
+    trk = meta ? meta.track : null
+  }
+  return {
+    instance: INSTANCE_ID,
+    shared: !!coord,
+    redisVar: REDIS_VAR,
+    redis: coord ? coord.redis.status : 'n/a',
+    leader,
+    leaderId: coord ? coord.knownLeader : INSTANCE_ID,
+    authoritative: leader,
+    phase: ph,
+    phaseEndsIn: ends === null || ends === undefined ? null : Math.max(0, Math.round((ends - Date.now()) / 100) / 10),
+    track: trk,
+    clients: local.length,
+    spectators: local.filter(c => !rosterIds.has(c.id)).length,
+    roster: roster.length,
+    uptimeSec: Math.round((Date.now() - STARTED) / 1000)
+  }
+}
+
+function serveHealth (res) {
+  health().then(h => {
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
+    res.end(JSON.stringify(h))
+  }, e => {
+    res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
+    res.end(JSON.stringify({ error: e.message }))
+  })
+}
+
 const server = http.createServer((req, res) => {
   let p = decodeURIComponent(new URL(req.url, 'http://x').pathname)
   if (p === '/') p = '/index.html'
+  if (p === '/health' || p === '/api/health') return serveHealth(res)
   if (p.startsWith('/vendor/three/')) return serveFrom(threeDir, p.slice('/vendor/three/'.length), res)
   if (p.startsWith('/shared/')) return serveFrom(sharedDir, p.slice('/shared/'.length), res)
   serveFrom(pubDir, p, res)
@@ -330,7 +379,35 @@ function tick () {
     cars,
     res: state.results
   }))
+  const list = presence()
+  const key = JSON.stringify(list)
+  if (key !== lastWho || now - lastWhoAt >= WHO_MS) {
+    lastWho = key
+    lastWhoAt = now
+    broadcast({ t: 'who', list })
+  }
   if (coord) coord.afterTick(metaSnapshot())
+}
+
+// Everyone on the site as the leader sees it: racers in grid order, then
+// spectators (including the ones whose sockets live on other instances).
+// Sent whenever it changes and at least every WHO_MS so late relays converge.
+const WHO_MS = 2000
+let lastWho = ''
+let lastWhoAt = 0
+function presence () {
+  const list = []
+  const over = state.phase === 'finished'
+  for (const id of roster) {
+    const c = clients.get(id)
+    if (!c) continue
+    const st = over || c.car.fin ? 'fin' : state.phase === 'racing' ? 'race' : 'grid'
+    list.push({ id: c.id, n: c.name, col: CAR_COLORS[c.colorIdx], st, l: c.car.lap, fin: c.car.fin ? 1 : 0 })
+  }
+  const rosterIds = new Set(roster)
+  const specs = [...clients.values()].filter(c => !rosterIds.has(c.id)).sort((a, b) => a.id - b.id)
+  for (const c of specs) list.push({ id: c.id, n: c.name, col: CAR_COLORS[c.colorIdx], st: 'spec', l: 0, fin: 0 })
+  return list
 }
 
 function handleMessage (c, m) {
@@ -468,7 +545,10 @@ wss.on('connection', async ws => {
     lobbySec: LOBBY_SEC,
     graceSec: GRACE_SEC,
     ph,
-    tl: ends === null ? -1 : Math.max(0, (ends - Date.now()) / 1000)
+    tl: ends === null ? -1 : Math.max(0, (ends - Date.now()) / 1000),
+    shared: !!coord,
+    inst: INSTANCE_ID,
+    leader: !coord || coord.leader
   }
   if (!view) voteFields(init)
   else if (view.ph === 'lobby') {
@@ -558,6 +638,7 @@ function sweepRemote (now) {
 function becomeLeader (meta) {
   for (const c of [...clients.values()]) if (!c.local) clients.delete(c.id)
   roster = []
+  lastWho = ''
   for (const c of clients.values()) {
     c.inRace = false
     c.slot = -1
@@ -664,7 +745,23 @@ const coord = REDIS_URL
   })
   : null
 
-if (coord) await coord.start()
+if (coord) {
+  console.log(`[coord] shared world: ON (REDIS_URL via ${REDIS_VAR}, instance ${INSTANCE_ID})`)
+  await coord.start()
+} else {
+  console.log('[coord] shared world: OFF — no REDIS_URL; this process runs its own lobby')
+  if (process.env.VERCEL || process.env.VERCEL_ENV) {
+    console.error([
+      '',
+      '!!! WARNING: running on Vercel WITHOUT a shared Redis !!!',
+      '!!! Every instance of this function runs its own lobby, so players WILL',
+      '!!! land in different races. Add a Redis and expose its URL as REDIS_URL',
+      '!!! (or ' + REDIS_VARS.slice(1).join(' / ') + ') and redeploy.',
+      '!!! See README.md, "One race for everyone".',
+      ''
+    ].join('\n'))
+  }
+}
 
 const tickTimer = setInterval(tick, TICK_MS)
 
