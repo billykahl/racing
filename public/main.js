@@ -177,6 +177,7 @@ let lastPhase = 'boot'
 let lastCount = -1
 let goPending = false
 let cameraMode = 0
+let lookBehind = false
 const audio = new GameAudio()
 const clockT = new THREE.Timer()
 let simTime = 0
@@ -818,6 +819,10 @@ addEventListener('keydown', e => {
     if (e.code === 'KeyR') rescue()
     if (e.code === 'KeyC') cameraMode = (cameraMode + 1) % 3
     if (e.code === 'KeyM') toggleMute()
+    if (e.code === 'KeyX') {
+      setLookBehind(true)
+      e.preventDefault()
+    }
     return
   }
   if (e.target && e.target.tagName === 'BUTTON') e.target.blur()
@@ -827,13 +832,21 @@ addEventListener('keydown', e => {
   audio.resume()
 })
 addEventListener('keyup', e => {
+  if (e.code === 'KeyX') setLookBehind(false)
   const k = KEYMAP[e.code]
   if (k) keys[k] = false
 })
 addEventListener('blur', () => {
   for (const k in keys) keys[k] = false
   boostPress = false
+  setLookBehind(false)
 })
+
+function setLookBehind (on) {
+  if (lookBehind === on) return
+  lookBehind = on
+  camReset = true // snap rather than swing the camera through the car
+}
 
 function rescue () {
   if (!own || phase !== 'racing' || own.fin) return
@@ -1294,7 +1307,10 @@ function updateCamera (dt) {
   if (target) {
     let hx = Math.cos(heading)
     let hz = Math.sin(heading)
-    if (own && cameraMode !== 2) {
+    // Look-behind mirrors the chase camera and uses the raw heading so drifts don't swing it
+    const back = lookBehind
+    const dir = back ? -1 : 1
+    if (own && cameraMode !== 2 && !back) {
       // blend towards the velocity direction so drifts swing the camera
       const vs = Math.hypot(own.vx, own.vz)
       if (vs > 4) {
@@ -1308,7 +1324,7 @@ function updateCamera (dt) {
       }
     }
     const up = target.normal || target.up || new THREE.Vector3(0, 1, 0)
-    if (cameraMode === 2) {
+    if (cameraMode === 2 && !back) {
       camDesired.set(target.x + hx * 0.6, target.y + 1.45, target.z + hz * 0.6)
       camLookDesired.set(target.x + hx * 30, target.y + 1.2, target.z + hz * 30)
       camPos.copy(camDesired)
@@ -1318,8 +1334,8 @@ function updateCamera (dt) {
       const far = cameraMode === 1
       const dist = (far ? 12.5 : 8.2) * (1 + Math.max(0, speed) / 260)
       const height = (far ? 5.2 : 3.1)
-      camDesired.set(target.x - hx * dist, target.y + height, target.z - hz * dist)
-      camLookDesired.set(target.x + hx * 5.5, target.y + 1.1, target.z + hz * 5.5)
+      camDesired.set(target.x - hx * dist * dir, target.y + height, target.z - hz * dist * dir)
+      camLookDesired.set(target.x + hx * 5.5 * dir, target.y + 1.1, target.z + hz * 5.5 * dir)
       const gy = world.carHeight(camDesired.x, camDesired.z, t.nearest(camDesired.x, camDesired.z, target.idx)) + 1.1
       if (camDesired.y < gy) camDesired.y = gy
       if (camReset) {
