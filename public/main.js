@@ -6,6 +6,7 @@ import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
 import { trackByName, tracks, HALF_W, SHOULDER, WALL_DIST, TOTAL_LAPS, MAX_PLAYERS } from '/shared/track.js'
 import { CAR_STYLES, CAR_COLORS, clampStyle, clampColor } from '/shared/cars.js'
+import { NAME_MAX, cleanName, nameProblem } from '/shared/names.js'
 import { World } from './world.js'
 import { Car } from './car.js'
 import { GameAudio } from './audio.js'
@@ -355,8 +356,20 @@ function esc (str) {
   return String(str).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]))
 }
 
-let nameMax = 14
+let nameMax = NAME_MAX
 let nameSent = ''
+let nameMsgTimer = 0
+// Put the input back to the confirmed name and show why the change was refused.
+function rejectName (why) {
+  if (me) elName.value = me.name
+  elName.classList.add('bad')
+  elJoinMsg.textContent = why || 'Name not changed'
+  clearTimeout(nameMsgTimer)
+  nameMsgTimer = setTimeout(() => {
+    elName.classList.remove('bad')
+    elJoinMsg.textContent = ''
+  }, 3000)
+}
 function sendName () {
   if (!connected || ws.readyState !== 1 || !me) return
   const want = elName.value.trim().slice(0, nameMax)
@@ -365,6 +378,12 @@ function sendName () {
     return
   }
   if (want === me.name || want === nameSent) return
+  // Same checks the server runs, so a bad name is refused instantly; the server still decides.
+  const why = nameProblem(cleanName(want))
+  if (why) {
+    rejectName(why)
+    return
+  }
   nameSent = want
   ws.send(JSON.stringify({ t: 'name', name: want }))
 }
@@ -465,7 +484,7 @@ function handle (m) {
     let colorIdx = m.colorIdx !== undefined ? clampColor(m.colorIdx) : CAR_COLORS.indexOf(String(m.color || '').toLowerCase())
     if (colorIdx < 0) colorIdx = 0
     me = { id: m.id, name: m.name, color: m.color || CAR_COLORS[colorIdx], style: styleIdx, colorIdx }
-    nameMax = m.nameMax || 14
+    nameMax = m.nameMax || NAME_MAX
     elName.maxLength = nameMax
     // Reuse the name from last time; the server still gets the final say.
     const saved = (localStorage.getItem('race.name') || '').slice(0, nameMax)
@@ -519,13 +538,7 @@ function handle (m) {
       if (document.activeElement !== elName) elName.value = m.name
       elName.classList.remove('bad')
     } else {
-      elName.value = m.name
-      elName.classList.add('bad')
-      elJoinMsg.textContent = m.why || 'Name not changed'
-      setTimeout(() => {
-        elName.classList.remove('bad')
-        elJoinMsg.textContent = ''
-      }, 3000)
+      rejectName(m.why)
     }
   } else if (m.t === 'car') {
     carSent = null
@@ -1680,6 +1693,8 @@ function tick (dt, render) {
   skids.uTime.value = simTime
   skids.flush()
   updateCamera(dt)
+  // Fade rival labels that are right in front of the lens (grid starts) so they don't fill the screen.
+  for (const r of remote.values()) if (r.car) r.car.updateLabelVisibility(camera.position)
   if (render) {
     if (composer) composer.render()
     else renderer.render(scene, camera)

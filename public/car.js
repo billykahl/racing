@@ -10,6 +10,11 @@ export function carStyleCount () {
 }
 
 const WHEEL_POS = [[1.35, -0.98], [1.35, 0.98], [-1.35, -0.98], [-1.35, 0.98]]
+// Rival name labels fade out as the camera closes in: hidden at LABEL_MIN_DIST
+// world units, fully shown from LABEL_FADE_DIST (about two car lengths) out.
+const LABEL_MIN_DIST = 7
+const LABEL_FADE_DIST = 14
+const _labelPos = new THREE.Vector3()
 
 // Materials and geometry that do not depend on the style or the paint colour.
 let COMMON = null
@@ -416,6 +421,18 @@ export class Car {
     this.label.material.map = carLabelTexture(name, place)
     this.label.material.needsUpdate = true
     if (old) old.dispose()
+  }
+
+  // Opacity from the label's distance to the camera; call once per frame after
+  // the camera has moved. Only the material changes, the sprite stays put.
+  updateLabelVisibility (cameraPos) {
+    if (!this.label) return
+    // The group sits directly in the scene, so its position + rotation place the label.
+    _labelPos.copy(this.label.position).applyQuaternion(this.group.quaternion).add(this.group.position)
+    const d = _labelPos.distanceTo(cameraPos)
+    const o = Math.max(0, Math.min(1, (d - LABEL_MIN_DIST) / (LABEL_FADE_DIST - LABEL_MIN_DIST)))
+    this.label.material.opacity = o
+    this.label.visible = o > 0.01
   }
 
   dispose () {

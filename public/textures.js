@@ -283,8 +283,9 @@ export function carLabelTexture (name, place = 0) {
   let nameW = g.measureText(name).width
   const maxName = place > 0 ? 470 : 720
   if (nameW > maxName) {
-    // Shrink long names rather than clipping them.
-    g.font = '800 ' + Math.max(30, Math.floor(60 * maxName / nameW)) + 'px ui-sans-serif, system-ui, sans-serif'
+    // Shrink long names rather than clipping them; a 20-char name of wide
+    // glyphs next to a place badge needs to go well under 30px to fit.
+    g.font = '800 ' + Math.max(18, Math.floor(60 * maxName / nameW)) + 'px ui-sans-serif, system-ui, sans-serif'
     nameW = g.measureText(name).width
   }
   const nameFontUsed = g.font
