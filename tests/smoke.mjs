@@ -1,11 +1,11 @@
 // Server smoke test: lobby -> countdown -> racing -> grace timeout -> results -> lobby.
-// Run with: node tests/smoke.mjs   (spawns its own server on port 8799 with short timers)
+// Run with: node tests/smoke.mjs   (spawns its own server on port 8799, or $SMOKE_PORT, with short timers)
 import { spawn } from 'node:child_process'
 import WebSocket from 'ws'
 import { tracks, TOTAL_LAPS } from '../shared/track.js'
 import { CAR_COLORS } from '../shared/cars.js'
 
-const PORT = 8799
+const PORT = +(process.env.SMOKE_PORT || 8799)
 const URL = 'ws://localhost:' + PORT
 let failures = 0
 const server = spawn(process.execPath, ['server.js'], {
@@ -26,7 +26,7 @@ function assert (cond, msg) {
 }
 
 function mkClient (label) {
-  const c = { label, ws: new WebSocket(URL), snaps: [], joins: [], inits: [], maps: [], named: [], cars: [], voted: [] }
+  const c = { label, ws: new WebSocket(URL), snaps: [], joins: [], inits: [], maps: [], named: [], cars: [], voted: [], whos: [] }
   c.ws.on('message', raw => {
     const m = JSON.parse(raw.toString())
     if (m.t === 'init') c.inits.push(m)
@@ -36,6 +36,7 @@ function mkClient (label) {
     else if (m.t === 'map') c.maps.push(m.name)
     else if (m.t === 'joined') c.joins.push(m)
     else if (m.t === 'snap') c.snaps.push(m)
+    else if (m.t === 'who') c.whos.push(m.list)
   })
   return new Promise((resolve, reject) => {
     c.ws.on('open', () => resolve(c))
@@ -59,8 +60,11 @@ function waitFor (pred, timeout, desc) {
   })
 }
 const last = c => c.snaps[c.snaps.length - 1]
+const lastWho = c => c.whos[c.whos.length - 1]
+const whoOf = (c, who) => (lastWho(c) || []).find(x => x.id === who.inits[0].id)
 const send = (c, obj) => c.ws.send(JSON.stringify(obj))
 const drive = (c, lap, prog, spd = 30) => send(c, { t: 'st', q: [10, 10, 0, lap, prog, spd, 0] })
+const health = () => fetch('http://localhost:' + PORT + '/health').then(r => r.json())
 
 const A = await mkClient('A')
 const B = await mkClient('B')
@@ -68,6 +72,7 @@ assert(await waitFor(() => A.inits.length && B.inits.length, 3000, 'init'), 'bot
 assert(A.inits[0].laps === TOTAL_LAPS && TOTAL_LAPS === 2, 'race is 2 laps')
 assert(A.inits[0].maxPlayers === 14, 'lobby allows 14 players')
 assert(tracks.some(t => t.name === A.inits[0].mapName), 'init names a known map')
+assert(A.inits[0].shared === false && A.inits[0].leader === true, 'init says the server is unshared and runs the world itself')
 await waitFor(() => last(A) && last(A).ph === 'lobby', 2000, 'lobby snap')
 assert(last(A).tl === -1, 'lobby waits (no countdown) until someone joins')
 
@@ -93,6 +98,17 @@ assert(await waitFor(() => last(A).votes[target] === 2, 2000, 'two votes'), 'tal
 send(A, { t: 'vote', map: 999 })
 assert(await waitFor(() => A.voted.length === 3, 2000, 'bad vote'), 'out-of-range vote answered')
 assert(A.voted[2].ok === false && last(A).votes.reduce((a, b) => a + b, 0) === 2, 'out-of-range vote refused and does not change the tally')
+// Presence + health
+assert(await waitFor(() => whoOf(A, A) && whoOf(A, B), 2000, 'who'), 'who lists both connected clients')
+assert(whoOf(A, A).st === 'spec' && whoOf(A, B).st === 'spec', 'nobody has joined: both are spectators')
+{
+  const h = await health()
+  assert(h.shared === false && h.leader === true && h.authoritative === true, '/health reports unshared + leader: ' + JSON.stringify(h))
+  assert(h.phase === last(A).ph, '/health phase matches the snapshot (' + h.phase + ')')
+  assert(h.clients === 2 && h.spectators === 2 && h.roster === 0, '/health counts the two open sockets')
+  assert(h.redisVar === null && h.redis === 'n/a' && typeof h.instance === 'string' && h.leaderId === h.instance, '/health has no redis and names itself leader')
+  assert(typeof h.uptimeSec === 'number' && tracks.some(t => t.name === h.track), '/health has uptime and a known track')
+}
 
 // Naming: free in the lobby, sanitised, and frozen once the grid locks.
 const carOf = (c, who) => last(c).cars.find(x => x.id === who.inits[0].id)
@@ -123,6 +139,8 @@ await waitFor(() => A.cars.length === 3, 2000, 'A car again')
 
 send(A, { t: 'join' })
 assert(await waitFor(() => A.joins.length === 1 && A.joins[0].ok, 2000, 'A joined'), 'A join accepted, slot ' + (A.joins[0] && A.joins[0].slot))
+assert(await waitFor(() => whoOf(A, A) && whoOf(A, A).st === 'grid', 1000, 'A on grid in who'), 'who shows A on the grid after joining')
+assert(lastWho(A)[0].id === A.inits[0].id && whoOf(A, B).st === 'spec', 'who lists racers first, spectators after')
 await sleep(120)
 assert(carOf(A, A) && carOf(A, A).n === 'Speedy', 'snapshot carries the chosen name')
 assert(carOf(A, A) && carOf(A, A).sty === 2 && carOf(A, A).col === CAR_COLORS[5], 'snapshot carries the chosen car style and colour')
@@ -157,13 +175,18 @@ assert(await waitFor(() => A.cars.length === 4, 2000, 'locked car'), 'car change
 assert(A.cars[3].ok === false && A.cars[3].style === 2 && A.cars[3].color === 5 && carOf(A, A).sty === 2 && carOf(A, A).col === CAR_COLORS[5], 'car is locked once the race starts, previous pick kept')
 const S = await mkClient('S')
 await waitFor(() => S.inits.length, 2000, 'spectator init')
+assert(await waitFor(() => whoOf(A, S) && whoOf(A, S).st === 'spec', 1000, 'S in who'), 'A sees the mid-race arrival S as a spectator')
+assert(whoOf(A, A).st === 'race' && whoOf(A, B).st === 'race', 'A and B are listed as racing')
+assert(await waitFor(() => whoOf(S, S) && whoOf(S, S).st === 'spec' && whoOf(S, A), 2000, 'S own who'), 'S itself receives the who list')
 send(S, { t: 'name', name: 'Watcher' })
 assert(await waitFor(() => S.named.length === 1, 2000, 'spectator rename'), 'spectator rename answered')
 assert(S.named[0].ok && S.named[0].name === 'Watcher', 'a spectator can rename while a race is running')
 send(S, { t: 'car', style: 3, color: 7 })
 assert(await waitFor(() => S.cars.length === 1, 2000, 'spectator car'), 'spectator car pick answered')
 assert(S.cars[0].ok && S.cars[0].style === 3 && S.cars[0].color === 7, 'a spectator can change car while a race is running')
+assert(await waitFor(() => whoOf(A, S) && whoOf(A, S).n === 'Watcher', 1000, 'S renamed in who'), 'who carries the spectator\'s new name')
 S.ws.close()
+assert(await waitFor(() => !whoOf(A, S), 1000, 'S gone from who'), 'S disappears from who after closing')
 
 // A drives and finishes both laps; B moves a little but never finishes.
 drive(A, 0, 0.5)
@@ -175,7 +198,14 @@ const t0 = Date.now()
 drive(A, TOTAL_LAPS, 0.0)
 assert(await waitFor(() => last(A).gl >= 0 && last(A).gl <= 3, 2000, 'grace countdown'), 'grace countdown starts once the leader finishes')
 assert(last(A).cars.find(c => c.id === A.inits[0].id).fin === 1, 'leader flagged finished')
+assert(await waitFor(() => whoOf(A, A) && whoOf(A, A).st === 'fin' && whoOf(A, A).fin === 1, 1000, 'A fin in who'), 'who shows A as finished')
+assert(whoOf(A, B).st === 'race', 'who still shows B racing')
 assert(await waitFor(() => last(A).ph === 'finished', 6000, 'finished'), 'race ends when the grace timer runs out (' + ((Date.now() - t0) / 1000).toFixed(1) + 's)')
+assert(await waitFor(() => whoOf(A, B) && whoOf(A, B).st === 'fin', 1000, 'B fin in who'), 'once the race is over everyone on the roster is listed as finished')
+{
+  const h = await health()
+  assert(h.phase === 'finished' && h.roster === 2 && h.clients === 2 && h.spectators === 0 && h.phaseEndsIn !== null, '/health tracks the phase and roster: ' + JSON.stringify(h))
+}
 const res = last(A).res
 assert(res && res.length === 2 && res[0].id === A.inits[0].id && res[0].time > 0, 'winner ranked first with a time')
 assert(res[1].id === B.inits[0].id && res[1].time === 0, 'unfinished racer listed as DNF')
