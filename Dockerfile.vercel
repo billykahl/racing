@@ -13,7 +13,7 @@ ENV NODE_ENV=production
 ENV PORT=80
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
-COPY package.json server.js ./
+COPY package.json server.js coord.js ./
 COPY shared ./shared
 COPY public ./public
 EXPOSE 80

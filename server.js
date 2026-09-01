@@ -1,9 +1,11 @@
 import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
+import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { WebSocketServer } from 'ws'
 import { tracks, TOTAL_LAPS, MAX_PLAYERS } from './shared/track.js'
+import { Coordinator, RECONCILE_MS } from './coord.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const PORT = +(process.env.PORT || 8765)
@@ -13,6 +15,10 @@ const RESULTS_SEC = +(process.env.RESULTS_SEC || 10)
 const GRACE_SEC = +(process.env.GRACE_SEC || 30)      // time the rest get once the leader finishes
 const HARD_CAP_SEC = +(process.env.HARD_CAP_SEC || 300)
 const TICK_MS = 50
+// With REDIS_URL set, every instance sharing that Redis presents one lobby
+// (see coord.js). Unset: this process is the whole world, all in memory.
+const REDIS_URL = process.env.REDIS_URL || ''
+const INSTANCE_ID = process.env.INSTANCE_ID || crypto.randomBytes(4).toString('hex')
 
 const COLORS = ['#e53935', '#1e88e5', '#43a047', '#fdd835', '#fb8c00', '#8e24aa', '#00acc1', '#ec407a', '#f5f5f5', '#546e7a', '#7cb342', '#ffb300', '#3949ab', '#d81b60']
 const NAMES = ['Flash', 'Turbo', 'Blitz', 'Rocket', 'Nova', 'Comet', 'Viper', 'Ghost', 'Storm', 'Pixel', 'Mach', 'Drift', 'Bolt', 'Zippy']
@@ -78,6 +84,9 @@ const wss = new WebSocketServer({ server })
 
 let nextId = 1
 let nextColor = 0
+// id -> client. Entries with `local: true` own a real WebSocket. On the leader
+// of a shared lobby the map also holds `local: false` entries for clients that
+// live on other instances; their `ws` is a proxy that publishes replies.
 const clients = new Map()
 let roster = [] // ids of racers, in grid order
 
@@ -107,8 +116,31 @@ function nextTrack () {
 function broadcast (obj) {
   const data = JSON.stringify(obj)
   for (const c of clients.values()) {
-    if (c.ws.readyState === 1) c.ws.send(data)
+    if (c.local && c.ws.readyState === 1) c.ws.send(data)
   }
+  if (coord) coord.queueBcast(data)
+}
+
+function makeClient (ws, id, name, colorIdx, local, inst) {
+  return {
+    ws,
+    id,
+    name,
+    colorIdx,
+    local,
+    inst, // instance hosting the socket (null until a remote client is heard from)
+    seen: Date.now(),
+    inRace: false,
+    moved: false,
+    slot: -1,
+    car: { x: 0, z: 0, a: 0, lap: 0, prog: 0, fin: false, finT: 0, spd: 0, flags: 0 }
+  }
+}
+
+// ws-shaped stand-in for a client on another instance: replies travel over
+// Redis to whichever instance holds the socket.
+function remoteWs (id) {
+  return { readyState: 1, send: data => coord.reply(id, data), close () {} }
 }
 
 function resetCar (c, slot) {
@@ -170,7 +202,9 @@ function openLobby () {
 }
 
 function tick () {
+  if (coord && !coord.leader) return // followers only relay
   const now = Date.now()
+  if (coord) sweepRemote(now)
   if (state.phase === 'lobby') {
     if (state.phaseEnds !== null && now >= state.phaseEnds) {
       if (roster.length > 0) {
@@ -236,23 +270,99 @@ function tick () {
     cars,
     res: state.results
   })
+  if (coord) coord.afterTick(metaSnapshot())
 }
 
-wss.on('connection', ws => {
-  const id = nextId++
-  const name = NAMES[(id - 1) % NAMES.length] + '-' + String(100 + Math.floor(Math.random() * 900))
-  const c = {
-    ws,
-    id,
-    name,
-    colorIdx: nextColor++ % COLORS.length,
-    inRace: false,
-    moved: false,
-    slot: -1,
-    car: { x: 0, z: 0, a: 0, lap: 0, prog: 0, fin: false, finT: 0, spd: 0, flags: 0 }
+function handleMessage (c, m) {
+  const ws = c.ws
+  if (m.t === 'join') {
+    if (state.phase !== 'lobby') {
+      ws.send(JSON.stringify({ t: 'joined', ok: false, why: state.phase === 'finished' ? 'Results are showing — next lobby opens in a moment!' : 'Race in progress — you can join the next one!' }))
+      return
+    }
+    if (c.inRace) return
+    if (roster.length >= MAX_PLAYERS) {
+      ws.send(JSON.stringify({ t: 'joined', ok: false, why: 'Race is full (14/14)!' }))
+      return
+    }
+    c.inRace = true
+    roster.push(c.id)
+    resetCar(c, roster.length - 1)
+    if (state.phaseEnds === null) state.phaseEnds = Date.now() + LOBBY_SEC * 1000
+    ws.send(JSON.stringify({ t: 'joined', ok: true, slot: c.slot }))
+    console.log('[join]', c.name, 'slot', c.slot, 'roster', roster.length)
+  } else if (m.t === 'name') {
+    if (nameLocked(c)) {
+      ws.send(JSON.stringify({ t: 'named', ok: false, name: c.name, why: 'Names are locked once the race starts' }))
+      return
+    }
+    const n = cleanName(m.name)
+    if (!n) {
+      ws.send(JSON.stringify({ t: 'named', ok: false, name: c.name, why: 'Pick a name with at least one letter' }))
+      return
+    }
+    if (n !== c.name) {
+      console.log('[rename]', c.name, '->', n)
+      c.name = n
+    }
+    ws.send(JSON.stringify({ t: 'named', ok: true, name: c.name }))
+  } else if (m.t === 'leave') {
+    if (!c.inRace || state.phase !== 'lobby') return
+    dropFromRoster(c)
+    ws.send(JSON.stringify({ t: 'left' }))
+  } else if (m.t === 'st' && c.inRace && Array.isArray(m.q)) {
+    const q = m.q
+    c.car.x = +q[0] || 0
+    c.car.z = +q[1] || 0
+    c.car.a = +q[2] || 0
+    c.car.spd = Math.max(0, +q[5] || 0)
+    c.car.flags = (+q[6] | 0) & 15
+    if (state.phase === 'racing') {
+      if (c.car.spd > 1) c.moved = true
+      if (+q[3] > c.car.lap) c.car.lap = Math.min(+q[3], TOTAL_LAPS)
+      c.car.prog = Math.max(0, Math.min(1, +q[4] || 0))
+      if (!c.car.fin && c.car.lap >= TOTAL_LAPS) {
+        c.car.fin = true
+        c.car.finT = Date.now() - state.raceStart
+        if (state.graceStart === null) {
+          state.graceStart = Date.now()
+          console.log('[first-finish]', c.name, (c.car.finT / 1000).toFixed(1) + 's', '-> grace', GRACE_SEC + 's')
+        }
+      }
+    }
   }
+}
+
+function handleClose (c) {
+  clients.delete(c.id)
+  if (c.inRace) dropFromRoster(c)
+}
+
+wss.on('connection', async ws => {
+  let id, colorIdx
+  let view = null // follower: the leader's phase/track for `init`
+  if (coord) {
+    try {
+      const a = await coord.admit()
+      id = a.id
+      colorIdx = a.colorRaw % COLORS.length
+      if (!coord.leader) view = a.meta || { ph: 'lobby', phaseEnds: null, track: track.name }
+    } catch (e) {
+      console.error('[coord] admit failed:', e.message)
+      ws.close(1013, 'try again')
+      return
+    }
+    if (ws.readyState !== 1) return
+  } else {
+    id = nextId++
+    colorIdx = nextColor++ % COLORS.length
+  }
+  const name = NAMES[(id - 1) % NAMES.length] + '-' + String(100 + Math.floor(Math.random() * 900))
+  const c = makeClient(ws, id, name, colorIdx, true, INSTANCE_ID)
   clients.set(id, c)
 
+  const ph = view ? view.ph : state.phase
+  const ends = view ? view.phaseEnds : state.phaseEnds
   ws.send(JSON.stringify({
     t: 'init',
     id,
@@ -261,12 +371,13 @@ wss.on('connection', ws => {
     nameMax: NAME_MAX,
     laps: TOTAL_LAPS,
     maxPlayers: MAX_PLAYERS,
-    mapName: track.name,
+    mapName: view ? view.track : track.name,
     lobbySec: LOBBY_SEC,
     graceSec: GRACE_SEC,
-    ph: state.phase,
-    tl: state.phaseEnds === null ? -1 : Math.max(0, (state.phaseEnds - Date.now()) / 1000)
+    ph,
+    tl: ends === null ? -1 : Math.max(0, (ends - Date.now()) / 1000)
   }))
+  if (coord && !coord.leader) coord.forward(c, { t: 'hello' })
 
   ws.on('message', raw => {
     let m
@@ -275,67 +386,18 @@ wss.on('connection', ws => {
     } catch {
       return
     }
-    if (m.t === 'join') {
-      if (state.phase !== 'lobby') {
-        ws.send(JSON.stringify({ t: 'joined', ok: false, why: state.phase === 'finished' ? 'Results are showing — next lobby opens in a moment!' : 'Race in progress — you can join the next one!' }))
-        return
-      }
-      if (c.inRace) return
-      if (roster.length >= MAX_PLAYERS) {
-        ws.send(JSON.stringify({ t: 'joined', ok: false, why: 'Race is full (14/14)!' }))
-        return
-      }
-      c.inRace = true
-      roster.push(id)
-      resetCar(c, roster.length - 1)
-      if (state.phaseEnds === null) state.phaseEnds = Date.now() + LOBBY_SEC * 1000
-      ws.send(JSON.stringify({ t: 'joined', ok: true, slot: c.slot }))
-      console.log('[join]', c.name, 'slot', c.slot, 'roster', roster.length)
-    } else if (m.t === 'name') {
-      if (nameLocked(c)) {
-        ws.send(JSON.stringify({ t: 'named', ok: false, name: c.name, why: 'Names are locked once the race starts' }))
-        return
-      }
-      const n = cleanName(m.name)
-      if (!n) {
-        ws.send(JSON.stringify({ t: 'named', ok: false, name: c.name, why: 'Pick a name with at least one letter' }))
-        return
-      }
-      if (n !== c.name) {
-        console.log('[rename]', c.name, '->', n)
-        c.name = n
-      }
-      ws.send(JSON.stringify({ t: 'named', ok: true, name: c.name }))
-    } else if (m.t === 'leave') {
-      if (!c.inRace || state.phase !== 'lobby') return
-      dropFromRoster(c)
-      ws.send(JSON.stringify({ t: 'left' }))
-    } else if (m.t === 'st' && c.inRace && Array.isArray(m.q)) {
-      const q = m.q
-      c.car.x = +q[0] || 0
-      c.car.z = +q[1] || 0
-      c.car.a = +q[2] || 0
-      c.car.spd = Math.max(0, +q[5] || 0)
-      c.car.flags = (+q[6] | 0) & 15
-      if (state.phase === 'racing') {
-        if (c.car.spd > 1) c.moved = true
-        if (+q[3] > c.car.lap) c.car.lap = Math.min(+q[3], TOTAL_LAPS)
-        c.car.prog = Math.max(0, Math.min(1, +q[4] || 0))
-        if (!c.car.fin && c.car.lap >= TOTAL_LAPS) {
-          c.car.fin = true
-          c.car.finT = Date.now() - state.raceStart
-          if (state.graceStart === null) {
-            state.graceStart = Date.now()
-            console.log('[first-finish]', c.name, (c.car.finT / 1000).toFixed(1) + 's', '-> grace', GRACE_SEC + 's')
-          }
-        }
-      }
-    }
+    if (!m || typeof m !== 'object') return
+    if (coord && !coord.leader) coord.forward(c, m)
+    else handleMessage(c, m)
   })
 
   ws.on('close', () => {
-    clients.delete(id)
-    if (c.inRace) dropFromRoster(c)
+    if (coord && !coord.leader) {
+      clients.delete(id)
+      coord.forward(c, { t: 'close' })
+    } else {
+      handleClose(c)
+    }
   })
 })
 
@@ -353,6 +415,131 @@ function dropFromRoster (c) {
   }
 }
 
+// ---------- shared lobby (REDIS_URL) ----------
+
+function metaSnapshot () {
+  return {
+    ph: state.phase,
+    phaseEnds: state.phaseEnds,
+    raceStart: state.raceStart,
+    graceStart: state.graceStart,
+    results: state.results,
+    track: track.name,
+    roster: roster.map(id => clients.get(id)).filter(Boolean)
+      .map(c => ({ id: c.id, name: c.name, colorIdx: c.colorIdx, slot: c.slot, moved: c.moved, car: c.car }))
+  }
+}
+
+// Remote clients whose instance went silent, or restored racers nobody
+// re-announced after a failover, leave the same way a closed socket does.
+function sweepRemote (now) {
+  for (const c of [...clients.values()]) {
+    if (c.local) continue
+    const gone = c.inst === null ? now - c.seen > RECONCILE_MS : coord.peerStale(c.inst, now)
+    if (gone) {
+      console.log('[coord] dropping unreachable client', c.name, c.inst === null ? '(never re-announced)' : '(instance ' + c.inst + ' silent)')
+      handleClose(c)
+    }
+  }
+}
+
+function becomeLeader (meta) {
+  for (const c of [...clients.values()]) if (!c.local) clients.delete(c.id)
+  roster = []
+  for (const c of clients.values()) {
+    c.inRace = false
+    c.slot = -1
+  }
+  state.phase = 'lobby'
+  state.phaseEnds = null
+  state.raceStart = 0
+  state.graceStart = null
+  state.results = null
+  if (!meta) return
+  state.phase = meta.ph
+  state.phaseEnds = meta.phaseEnds
+  state.raceStart = meta.raceStart
+  state.graceStart = meta.graceStart
+  state.results = meta.results
+  const ti = tracks.findIndex(t => t.name === meta.track)
+  if (ti !== -1) {
+    trackPtr = trackOrder.indexOf(ti)
+    track = tracks[ti]
+  }
+  for (const r of meta.roster) {
+    let c = clients.get(r.id)
+    if (!c) {
+      c = makeClient(remoteWs(r.id), r.id, r.name, r.colorIdx, false, null)
+      clients.set(r.id, c)
+    }
+    c.name = r.name
+    c.inRace = true
+    c.slot = r.slot
+    c.moved = r.moved
+    Object.assign(c.car, r.car)
+    roster.push(r.id)
+  }
+}
+
+function stopLeading () {
+  for (const c of [...clients.values()]) if (!c.local) clients.delete(c.id)
+  roster = []
+}
+
+function onCmd ({ inst, id, name, colorIdx, m }) {
+  let c = clients.get(id)
+  if (!c) {
+    if (m.t === 'close') return
+    c = makeClient(remoteWs(id), id, cleanName(name) || 'Racer-' + id, (+colorIdx | 0) % COLORS.length, false, inst)
+    clients.set(id, c)
+  }
+  if (!c.local) {
+    c.inst = inst
+    c.seen = Date.now()
+  }
+  if (m.t === 'hello') return
+  if (m.t === 'close') {
+    if (!c.local) handleClose(c)
+    return
+  }
+  handleMessage(c, m)
+}
+
+function onRelay (str) {
+  for (const c of clients.values()) {
+    if (c.local && c.ws.readyState === 1) c.ws.send(str)
+  }
+}
+
+function onReply (to, str) {
+  const c = clients.get(to)
+  if (!c || !c.local) return
+  if (c.ws.readyState === 1) c.ws.send(str)
+  // Keep the follower's copy of the name current so a re-announce after a
+  // leader change carries the chosen name, not the random one.
+  try {
+    const m = JSON.parse(str)
+    if (m.t === 'named' && m.ok) c.name = m.name
+  } catch {}
+}
+
+const coord = REDIS_URL
+  ? new Coordinator({
+    url: REDIS_URL,
+    instanceId: INSTANCE_ID,
+    handlers: {
+      onPromote: becomeLeader,
+      onDemote: stopLeading,
+      onLeaderChange: () => coord.announce([...clients.values()].filter(c => c.local)),
+      onCmd,
+      onRelay,
+      onReply
+    }
+  })
+  : null
+
+if (coord) await coord.start()
+
 const tickTimer = setInterval(tick, TICK_MS)
 
 server.listen(PORT, () => {
@@ -367,11 +554,14 @@ function shutdown (signal) {
   shuttingDown = true
   console.log('[shutdown]', new Date().toISOString(), signal, 'clients:', clients.size)
   clearInterval(tickTimer)
-  for (const c of clients.values()) {
+  const local = [...clients.values()].filter(c => c.local)
+  for (const c of local) {
     if (c.ws.readyState === 1) c.ws.close(1001, 'server shutting down')
   }
   wss.close()
-  server.close(() => process.exit(0))
+  const finish = () => server.close(() => process.exit(0))
+  if (coord) coord.stop(local).then(finish, finish)
+  else finish()
   setTimeout(() => process.exit(0), 5000).unref()
 }
 process.on('SIGTERM', () => shutdown('SIGTERM'))

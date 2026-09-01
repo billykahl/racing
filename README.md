@@ -32,16 +32,53 @@ runs the same container locally, or build and run it by hand:
 docker build -f Dockerfile.vercel -t vibe-racing . && docker run --rm -p 8765:80 vibe-racing
 ```
 
+### One race for everyone: add Redis
+
+Vercel scales container functions to several instances and offers no way to
+pin it to one. Without shared state each instance would run its own lobby and
+players would land in different races. The rule of the game is that there is
+exactly one race in the world: whoever arrives while it runs spectates and
+joins the next lobby. To get that across instances, give the deployment a
+Redis:
+
+1. In the Vercel project open **Storage → Marketplace** and add a Redis
+   (Upstash Redis or Redis Cloud both work; any Redis 6+ reachable over
+   `redis://` / `rediss://` does).
+2. Make sure the project has the connection string as **`REDIS_URL`** in its
+   environment variables (rename the marketplace's variable if it uses a
+   different name, e.g. `KV_URL`).
+3. Redeploy.
+
+With `REDIS_URL` set, every instance connected to that Redis presents the same
+lobby and race (`coord.js`): one instance holds a 3 s leader lease and runs
+the race exactly as the single-process server does; the others relay their
+players' messages to it and its snapshots back over pub/sub. If the leader is
+scaled down or dies, another instance takes over within about 0.5 s (clean
+shutdown) or 3.5 s (crash), restoring the phase, timers, track and grid from
+Redis; only the players who were connected to the dead instance drop out, and
+they reconnect as spectators. Without `REDIS_URL` the server is exactly what it
+was: one in-memory lobby per process, which on Vercel means one lobby per
+instance.
+
+Redis traffic is small and predictable, which matters for per-command
+pricing: the leader issues about 3 commands/s on its own (lease refresh
+twice a second, state write once a second), plus 20 publishes/s (one per
+snapshot) while at least one other instance is alive. Each other instance
+issues about 6 commands/s (lease poll, leader lookup and presence beat twice a
+second) plus at most 20 publishes/s of batched player messages while its
+players are driving, and 3 commands per new connection. Two busy instances
+therefore stay under ~50 commands/s; an idle single instance under ~4.
+
 Caveats:
 
-- Lobby state lives in memory. If Vercel scales to more than one instance,
-  players can land in different lobbies. Fine for small groups; use an
-  external store for larger ones.
 - Each WebSocket connection is capped by the function max duration (300 s on
   Hobby, up to 800 s on Pro). The client auto-reconnects afterwards, which
   drops a racer mid-race if it happens during a race.
 - Instances scale to zero after 5 minutes without traffic, so the first visit
   after idle takes a cold start.
+- If Redis becomes unreachable the race pauses (nobody can hold the lease)
+  rather than splitting into per-instance lobbies; it resumes when Redis is
+  back. Messages sent during a leader change are dropped, not queued.
 
 You get a random call sign like `Turbo-482`; type your own name in the
 **RACING AS** box next to JOIN RACE (up to 14 characters, remembered for next
@@ -90,17 +127,22 @@ and **Medium**. Ultra is the default; if the average frame rate drops under
 ## Tuning knobs (env vars)
 
 `PORT`, `LOBBY_SEC`, `COUNTDOWN_SEC`, `RESULTS_SEC`, `GRACE_SEC`,
-`HARD_CAP_SEC`. Laps, player cap and track width live in `shared/track.js`.
+`HARD_CAP_SEC`, `REDIS_URL` (shared lobby across instances, see above),
+`INSTANCE_ID` (label for this instance in logs and the leader lease; random by
+default). Laps, player cap and track width live in `shared/track.js`.
 
 ## Test
 
 ```sh
 npm test           # spins up a server on :8799 and runs the lobby/race/timeout smoke test
+npm run test:shared # needs Docker: starts redis:7-alpine on :6399, two servers on :8801/:8802,
+                    # checks they share one race, then kills the leader and checks the takeover
 ```
 
 ## Layout
 
 - `server.js` — static files + WebSocket lobby/race state machine (20 Hz snapshots)
+- `coord.js` — leader lease, state hand-off and pub/sub relays over Redis when `REDIS_URL` is set
 - `shared/track.js` — circuit definitions, centreline resampling, elevation profile, grid slots
 - `public/main.js` — game loop, car physics, networking, chase camera, HUD, minimap, post-processing
 - `public/world.js` — terrain, track ribbon, curbs, barriers, ponds, forests, grandstand, sky, props

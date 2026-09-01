@@ -6,9 +6,11 @@
   "description": "Multiplayer 3D chase-cam kart racing in the browser (three.js + WebSockets)",
   "scripts": {
     "start": "node server.js",
-    "test": "node tests/smoke.mjs"
+    "test": "node tests/smoke.mjs",
+    "test:shared": "node tests/shared-lobby.mjs"
   },
   "dependencies": {
+    "ioredis": "^5.11.1",
     "three": "^0.185.1",
     "ws": "^8.18.0"
   }
