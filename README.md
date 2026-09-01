@@ -44,10 +44,13 @@ Redis:
 1. In the Vercel project open **Storage → Marketplace** and add a Redis
    (Upstash Redis or Redis Cloud both work; any Redis 6+ reachable over
    `redis://` / `rediss://` does).
-2. Make sure the project has the connection string as **`REDIS_URL`** in its
-   environment variables (rename the marketplace's variable if it uses a
-   different name, e.g. `KV_URL`).
-3. Redeploy.
+2. Make sure the project has the connection string in its environment
+   variables. The server takes the first of **`REDIS_URL`**, `KV_URL`,
+   `UPSTASH_REDIS_URL`, `REDIS_TLS_URL`, `REDIS_PRIVATE_URL` that is set, so
+   the marketplace's own name usually works as is.
+3. Redeploy, then check it took: open `/health` on the site and look for
+   `"shared": true`, or check the function logs for
+   `[coord] shared world: ON (REDIS_URL via KV_URL, instance …)`.
 
 With `REDIS_URL` set, every instance connected to that Redis presents the same
 lobby and race (`coord.js`): one instance holds a 3 s leader lease and runs
@@ -56,9 +59,31 @@ players' messages to it and its snapshots back over pub/sub. If the leader is
 scaled down or dies, another instance takes over within about 0.5 s (clean
 shutdown) or 3.5 s (crash), restoring the phase, timers, track and grid from
 Redis; only the players who were connected to the dead instance drop out, and
-they reconnect as spectators. Without `REDIS_URL` the server is exactly what it
+they reconnect as spectators. Without a Redis URL the server is exactly what it
 was: one in-memory lobby per process, which on Vercel means one lobby per
-instance.
+instance. That case is made loud: the server logs
+`[coord] shared world: OFF — no REDIS_URL; this process runs its own lobby`,
+adds a multi-line warning to stderr when `VERCEL` is set, and every player who
+is not on localhost sees a red banner at the bottom of the page.
+
+### `/health`
+
+`GET /health` (also `/api/health`, never cached) returns JSON describing the
+instance that answered: `instance`, `shared`, `redisVar` (which variable the
+URL came from), `redis` (ioredis connection status), `leader` / `leaderId`,
+`authoritative` (whether this instance runs the state machine — a follower
+reports its `phase`, `phaseEndsIn` and `track` from Redis and `roster: 0`),
+`clients` and `spectators` (sockets on this instance), `roster`, `uptimeSec`.
+On a multi-instance deploy, refresh it a few times: `instance` should change,
+`leaderId` should not.
+
+### Who is online
+
+The panel in the top left lists everyone on the site (`ONLINE · n`): racers in
+race order with their lap or status, then spectators marked `watching`. Its
+header carries a small `🌐 shared` or `1 server` tag telling you which mode the
+server you are on runs in. The list comes from a `who` broadcast the leader
+sends whenever it changes and at least every 2 s.
 
 Redis traffic is small and predictable, which matters for per-command
 pricing: the leader issues about 3 commands/s on its own (lease refresh
@@ -127,9 +152,10 @@ and **Medium**. Ultra is the default; if the average frame rate drops under
 ## Tuning knobs (env vars)
 
 `PORT`, `LOBBY_SEC`, `COUNTDOWN_SEC`, `RESULTS_SEC`, `GRACE_SEC`,
-`HARD_CAP_SEC`, `REDIS_URL` (shared lobby across instances, see above),
-`INSTANCE_ID` (label for this instance in logs and the leader lease; random by
-default). Laps, player cap and track width live in `shared/track.js`.
+`HARD_CAP_SEC`, `REDIS_URL` or one of its aliases (shared lobby across
+instances, see above), `INSTANCE_ID` (label for this instance in logs, `/health`
+and the leader lease; random by default). Laps, player cap and track width
+live in `shared/track.js`.
 
 ## Test
 
@@ -138,6 +164,11 @@ npm test           # spins up a server on :8799 and runs the lobby/race/timeout 
 npm run test:shared # needs Docker: starts redis:7-alpine on :6399, two servers on :8801/:8802,
                     # checks they share one race, then kills the leader and checks the takeover
 ```
+
+Both also cover `/health` and the `who` presence list. To run them next to
+another copy of the repo, move the ports: `SMOKE_PORT` for the smoke test,
+`SHARED_PORT_A`, `SHARED_PORT_B` and `TEST_REDIS_PORT` (the Redis container is
+named `racing-test-redis-<port>`) for the shared one.
 
 ## Layout
 

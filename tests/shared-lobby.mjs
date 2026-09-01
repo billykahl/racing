@@ -1,15 +1,16 @@
 // Shared-lobby test: two server instances behind one Redis present ONE race,
 // and the survivor takes over when the leader dies.
 // Run with: npm run test:shared   (needs Docker; starts redis:7-alpine on :6399)
+// Ports: TEST_REDIS_PORT, SHARED_PORT_A, SHARED_PORT_B override the defaults.
 import { spawn, execSync } from 'node:child_process'
 import WebSocket from 'ws'
 import Redis from 'ioredis'
 import { TOTAL_LAPS } from '../shared/track.js'
 
-const REDIS_PORT = 6399
+const REDIS_PORT = +(process.env.TEST_REDIS_PORT || 6399)
 const REDIS_URL = 'redis://127.0.0.1:' + REDIS_PORT
-const CONTAINER = 'racing-test-redis'
-const PORTS = { s1: 8801, s2: 8802 }
+const CONTAINER = 'racing-test-redis-' + REDIS_PORT
+const PORTS = { s1: +(process.env.SHARED_PORT_A || 8801), s2: +(process.env.SHARED_PORT_B || 8802) }
 const TIMERS = { LOBBY_SEC: 2, COUNTDOWN_SEC: 1, RESULTS_SEC: 2, GRACE_SEC: 3, HARD_CAP_SEC: 4 }
 let failures = 0
 const sleep = ms => new Promise(r => setTimeout(r, ms))
@@ -91,7 +92,7 @@ function cleanup () {
 process.on('exit', cleanup)
 
 function mkClient (label, port) {
-  const c = { label, port, ws: new WebSocket('ws://localhost:' + port), snaps: [], joins: [], inits: [], maps: [], named: [], closed: false }
+  const c = { label, port, ws: new WebSocket('ws://localhost:' + port), snaps: [], joins: [], inits: [], maps: [], named: [], whos: [], closed: false }
   c.ws.on('message', raw => {
     const m = JSON.parse(raw.toString())
     if (m.t === 'init') c.inits.push(m)
@@ -99,6 +100,7 @@ function mkClient (label, port) {
     else if (m.t === 'map') c.maps.push(m.name)
     else if (m.t === 'joined') c.joins.push(m)
     else if (m.t === 'snap') c.snaps.push(m)
+    else if (m.t === 'who') c.whos.push(m.list)
   })
   c.ws.on('close', () => { c.closed = true })
   c.ws.on('error', () => {})
@@ -126,6 +128,9 @@ function waitFor (pred, timeout, desc) {
   })
 }
 const last = c => c.snaps[c.snaps.length - 1]
+const lastWho = c => c.whos[c.whos.length - 1]
+const whoOf = (c, who) => (lastWho(c) || []).find(x => x.id === who.inits[0].id)
+const health = inst => fetch('http://localhost:' + PORTS[inst] + '/health').then(r => r.json())
 const idOf = c => c.inits[0].id
 const send = (c, obj) => c.ws.send(JSON.stringify(obj))
 const drive = (c, lap, prog, spd = 30, x = 10, z = 10) => send(c, { t: 'st', q: [x, z, 0, lap, prog, spd, 0] })
@@ -141,7 +146,21 @@ const B = await mkClient('B', PORTS.s2)
 assert(await waitFor(() => A.inits.length && B.inits.length, 3000, 'init'), 'both clients received init')
 assert(idOf(A) !== idOf(B), 'ids are unique across instances: ' + idOf(A) + ' / ' + idOf(B))
 assert(A.inits[0].mapName === B.inits[0].mapName, 'both instances announce the same map: ' + A.inits[0].mapName)
+assert(A.inits[0].shared === true && B.inits[0].shared === true, 'both instances tell clients the world is shared')
+assert(A.inits[0].leader !== B.inits[0].leader, 'exactly one instance tells its clients it runs the world')
 assert(await waitFor(() => last(A) && last(B) && last(A).ph === 'lobby' && last(B).ph === 'lobby', 3000, 'lobby snaps'), 'both clients get lobby snapshots')
+{
+  const [h1, h2] = await Promise.all([health('s1'), health('s2')])
+  const hs = { s1: h1, s2: h2 }
+  assert(h1.shared === true && h2.shared === true && h1.redisVar === 'REDIS_URL' && h1.redis === 'ready', '/health on both reports a shared world over REDIS_URL')
+  assert((h1.leader ? 1 : 0) + (h2.leader ? 1 : 0) === 1, 'exactly one /health reports leader:true')
+  assert(h1.leaderId === leader0 && h2.leaderId === leader0, 'both /health name the same leader: ' + h1.leaderId + ' / ' + h2.leaderId)
+  assert(hs[leader0].authoritative === true && hs[follower0].authoritative === false, 'the follower reports authoritative:false')
+  assert(hs[leader0].phase === 'lobby' && hs[follower0].phase === 'lobby', 'both /health report the lobby phase (follower via Redis)')
+  assert(h1.clients === 1 && h2.clients === 1, 'each instance counts its own socket')
+  assert(hs[leader0].roster === 0 && hs[follower0].roster === 0, 'nobody on the roster yet')
+}
+assert(await waitFor(() => whoOf(A, A) && whoOf(A, B) && whoOf(B, A) && whoOf(B, B), 2500, 'who both'), 'who on both instances lists both clients')
 
 send(B, { t: 'name', name: 'Relayed' })
 assert(await waitFor(() => B.named.length === 1, 2000, 'B named'), 'rename over the relay answered')
@@ -168,6 +187,9 @@ send(C, { t: 'join' })
 assert(await waitFor(() => C.joins.length === 1, 2000, 'C join reply'), 'late join answered')
 assert(C.joins[0] && C.joins[0].ok === false && /Race in progress/.test(C.joins[0].why), 'late arrival during racing is refused: ' + (C.joins[0] && C.joins[0].why))
 assert(await waitFor(() => last(C) && last(C).ph === 'racing' && last(C).cars.length === 2, 2000, 'C snaps'), 'spectator on the follower receives race snapshots')
+assert(await waitFor(() => whoOf(A, C) && whoOf(A, C).st === 'spec' && whoOf(B, C) && whoOf(B, C).st === 'spec', 1500, 'C in who'), 'spectator on the follower appears in who on both instances')
+assert(whoOf(A, A).st === 'race' && whoOf(A, B).st === 'race', 'who lists both racers as racing')
+assert(await waitFor(() => whoOf(C, C) && whoOf(C, C).st === 'spec', 2500, 'C own who'), 'the spectator on the follower receives who itself')
 
 drive(B, 0, 0.3, 30, 33, 44)
 assert(await waitFor(() => carOf(A, B) && carOf(A, B).x === 33 && carOf(A, B).z === 44, 1000, 'B state on A'), 'driving state sent on :' + PORTS.s2 + ' shows in snapshots on :' + PORTS.s1)
@@ -186,6 +208,7 @@ await sleep(150)
 assert(A.maps.length >= 1 && B.maps.length >= 1 && A.maps.at(-1) === B.maps.at(-1) && A.maps.at(-1) !== A.inits[0].mapName, 'map rotated identically on both: ' + A.maps.at(-1))
 assert(last(A).cars.length === 2 && last(B).cars.length === 2, 'both racers kept on the grid on both instances')
 C.ws.close()
+assert(await waitFor(() => !whoOf(A, C) && !whoOf(B, C), 1500, 'C gone from who'), 'closed spectator on the follower disappears from who on both instances')
 
 // ---------- leader failover ----------
 const leader = await redis.get('race:leader')
@@ -210,9 +233,18 @@ assert(D.inits[0] && D.inits[0].ph === 'lobby', 'new client on the survivor sees
 send(D, { t: 'join' })
 assert(await waitFor(() => D.joins.length === 1 && D.joins[0].ok, 2000, 'D joined'), 'new client can join the lobby on the survivor')
 assert(await waitFor(() => last(S).cars.some(c => c.id === idOf(D)), 1000, 'D on grid'), 'survivor snapshots show the new racer')
+const E = await mkClient('E', PORTS[survivor])
+await waitFor(() => E.inits.length, 2000, 'E init')
+assert(E.inits[0] && E.inits[0].shared === true && E.inits[0].leader === true, 'survivor tells a new client it now runs the world')
+assert(await waitFor(() => whoOf(S, E) && whoOf(S, E).st === 'spec' && whoOf(S, D) && whoOf(S, D).st === 'grid', 1500, 'E in who'), 'after failover a spectator on the survivor appears in who next to the new racer')
+{
+  const h = await health(survivor)
+  assert(h.leader === true && h.leaderId === survivor && h.authoritative === true && h.clients === 3, 'survivor /health reports leadership and its three sockets: ' + JSON.stringify(h))
+}
 
 A.ws.close()
 B.ws.close()
 D.ws.close()
+E.ws.close()
 console.log(failures === 0 ? 'SHARED LOBBY TEST PASSED' : 'SHARED LOBBY TEST FAILED (' + failures + ')')
 process.exit(failures === 0 ? 0 : 1)

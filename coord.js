@@ -128,6 +128,18 @@ export class Coordinator {
     return { id: res[0][1], colorRaw: res[1][1] - 1, meta }
   }
 
+  // The leader's last written state (phase, timers, track, roster), or null.
+  // Used for /health on a follower, which holds no race state of its own.
+  async readMeta () {
+    if (this.redis.status !== 'ready') return null
+    try {
+      const raw = await this.redis.get(K.meta)
+      return raw ? JSON.parse(raw) : null
+    } catch {
+      return null
+    }
+  }
+
   // ----- follower side -----
   forward (c, m) {
     this.outbox.push({ id: c.id, name: c.name, colorIdx: c.colorIdx, m })

@@ -34,6 +34,7 @@ const elQuality = $('quality')
 const elMute = $('muteBtn')
 const elLeave = $('leaveBtn')
 const elFps = $('fps')
+const elModeWarn = $('modeWarn')
 
 // ---------- quality ----------
 const QUALITY = {
@@ -150,6 +151,8 @@ let clock = 0
 let res = null
 let carsSnap = []
 let sorted = []
+let who = [] // everyone on the site, from the server's `who` broadcast
+let serverInfo = null // { shared, inst, leader } from `init`
 let standingsDirty = true
 let mapName = ''
 let track = null
@@ -319,6 +322,7 @@ function connect () {
     for (const r of remote.values()) removeRemote(r)
     remote.clear()
     carsSnap = []
+    who = []
     standingsDirty = true
     elOverlayMsg.textContent = 'Connection lost — reconnecting…'
     elOverlay.style.display = 'flex'
@@ -368,7 +372,16 @@ function handle (m) {
     graceSec = m.graceSec
     phase = m.ph
     tl = m.tl
+    serverInfo = { shared: !!m.shared, inst: m.inst || '', leader: !!m.leader }
+    // Local dev runs one process by design; anywhere else an unshared server
+    // means every instance has its own lobby, which the player should know.
+    const local = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname)
+    elModeWarn.style.display = !serverInfo.shared && !local ? 'block' : 'none'
+    standingsDirty = true
     loadTrack(m.mapName)
+  } else if (m.t === 'who') {
+    who = Array.isArray(m.list) ? m.list : []
+    standingsDirty = true
   } else if (m.t === 'map') {
     loadTrack(m.name)
   } else if (m.t === 'joined') {
@@ -1183,17 +1196,41 @@ function fmtClock (ms) {
   return m + ':' + (r < 10 ? '0' : '') + r.toFixed(1)
 }
 
+// The top-left panel lists everyone on the site: racers in race order (from
+// the snapshot), then spectators (from the `who` list).
+function nameCell (n, self) {
+  const t = self ? '<b>' + esc(n) + '</b><span class="you">(you)</span>' : esc(n)
+  return '<span class="nm">' + t + '</span>'
+}
+
 function rebuildStandings () {
   sorted = [...carsSnap].sort((A, B) => (B.fin - A.fin) || ((B.l + B.p) - (A.l + A.p)))
   let html = ''
   const showPlace = phase === 'racing' || phase === 'finished'
+  if (who.length) {
+    const tag = serverInfo ? (serverInfo.shared ? '\u{1F310} shared' : '1 server') : ''
+    const inst = serverInfo ? esc(serverInfo.inst) : ''
+    html += `<div class="hdr"><span>ONLINE · ${who.length}</span><span class="srv" title="instance ${inst}">${tag}</span></div>`
+  }
+  const racing = new Set()
   sorted.forEach((c, i) => {
+    racing.add(c.id)
     const self = me && c.id === me.id
-    html += `<div class="row${self ? ' self' : ''}"><span class="pos">${i + 1}</span><span class="chip" style="background:${c.col}"></span><span class="nm">${self ? '<b>' + esc(c.n) + '</b>' : esc(c.n)}</span><span class="lp">${c.fin ? '\u{1F3C1}' : 'L' + Math.min(c.l + 1, LAPS)}</span></div>`
+    let lp
+    if (phase === 'lobby') lp = 'on grid'
+    else if (phase === 'countdown') lp = 'ready'
+    else if (phase === 'finished') lp = c.fin ? '\u{1F3C1}' : 'DNF'
+    else lp = c.fin ? '\u{1F3C1}' : 'L' + Math.min(c.l + 1, LAPS)
+    html += `<div class="row${self ? ' self' : ''}"><span class="pos">${i + 1}</span><span class="chip" style="background:${c.col}"></span>${nameCell(c.n, self)}<span class="lp">${lp}</span></div>`
     // Place badge over every rival's car (our own car never carries a label).
     const r = remote.get(c.id)
     if (r && r.car) r.car.setLabel(c.n, showPlace ? i + 1 : 0)
   })
+  for (const w of who) {
+    if (w.st !== 'spec' || racing.has(w.id)) continue
+    const self = me && w.id === me.id
+    html += `<div class="row spec${self ? ' self' : ''}"><span class="pos">\u{1F441}</span><span class="chip" style="background:${esc(w.col)}"></span>${nameCell(w.n, self)}<span class="lp">watching</span></div>`
+  }
   elStand.innerHTML = html
 }
 
@@ -1232,11 +1269,11 @@ function hud (dt) {
     }
   } else if (phase === 'countdown') {
     pm = ''
-    sm = joined ? 'Lights out and away we go…' : 'Spectating — next race opens after this one'
+    sm = joined ? 'Lights out and away we go…' : 'Grid is locked — ' + n + ' racing · spectating'
   } else if (phase === 'racing') {
     if (!joined) {
       pm = 'RACE IN PROGRESS'
-      sm = 'Spectating the leader — the next lobby opens when this race ends'
+      sm = 'Race in progress — ' + n + ' racing · you can join the next lobby'
     } else if (gl >= 0 && own && !own.fin) {
       pm = 'LEADER FINISHED — ' + Math.ceil(gl) + 's LEFT'
       sm = 'Finish before the timer runs out!'
