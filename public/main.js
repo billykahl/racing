@@ -4,7 +4,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
-import { trackByName, HALF_W, SHOULDER, WALL_DIST, TOTAL_LAPS, MAX_PLAYERS } from '/shared/track.js'
+import { trackByName, tracks, HALF_W, SHOULDER, WALL_DIST, TOTAL_LAPS, MAX_PLAYERS } from '/shared/track.js'
 import { CAR_STYLES, CAR_COLORS, clampStyle, clampColor } from '/shared/cars.js'
 import { World } from './world.js'
 import { Car } from './car.js'
@@ -22,6 +22,9 @@ const elNotice = $('notice')
 const elJoinWrap = $('joinWrap')
 const elBtn = $('joinBtn')
 const elJoinMsg = $('joinMsg')
+const elMapVote = $('mapVote')
+const elMapGrid = $('mapVoteGrid')
+const elMapStatus = $('mapVoteStatus')
 const elName = $('nameInput')
 const elStyleRow = $('styleRow')
 const elColorRow = $('colorRow')
@@ -324,6 +327,9 @@ function connect () {
     remote.clear()
     carsSnap = []
     standingsDirty = true
+    myVote = -1
+    voteOpen = false
+    renderVote()
     elOverlayMsg.textContent = 'Connection lost — reconnecting…'
     elOverlay.style.display = 'flex'
     setTimeout(connect, 1200)
@@ -470,9 +476,20 @@ function handle (m) {
     graceSec = m.graceSec
     phase = m.ph
     tl = m.tl
+    myVote = -1
+    buildVoteTiles(m.maps || [])
+    applyVoteSnap(m)
     loadTrack(m.mapName)
   } else if (m.t === 'map') {
     loadTrack(m.name)
+  } else if (m.t === 'voted') {
+    if (m.ok) {
+      myVote = m.map
+      renderVote()
+    } else {
+      elJoinMsg.textContent = m.why || 'Vote not counted'
+      setTimeout(() => { elJoinMsg.textContent = '' }, 4000)
+    }
   } else if (m.t === 'joined') {
     if (m.ok) {
       pending = true
@@ -583,6 +600,8 @@ function handle (m) {
         own.cpHalf = false
       }
     }
+    if (phase === 'lobby' && lastPhase !== 'lobby') myVote = -1
+    applyVoteSnap(m)
     lastPhase = phase
   }
 }
@@ -625,6 +644,118 @@ function respawnOwn (slot) {
   Object.assign(own, { x: g.x, z: g.z, y: g.y, a: g.a, vx: 0, vz: 0, idx: n.idx, lap: 0, prog: n.prog, prevProg: n.prog, cpHalf: false, fin: false, boost: 1, boostOn: false, boostCd: 0, drifting: false, driftDir: 0, driftT: 0, driftRamp: 0, turbo: 0, fwd: 0, lat: 0 })
   boostPress = false
   camReset = true
+}
+
+// ---------- lobby map vote ----------
+let mapNames = []
+let voteTally = []
+let voteOpen = false
+let voteMapIdx = -1
+let myVote = -1
+let voteKey = ''
+const voteTiles = [] // { btn, count, name }
+
+// Small north-up thumbnail of the centreline, drawn once per map.
+function drawThumb (cv, tr) {
+  const dpr = 2
+  const W = 104 * dpr
+  const H = 64 * dpr
+  cv.width = W
+  cv.height = H
+  const g = cv.getContext('2d')
+  g.fillStyle = 'rgba(30, 40, 30, 0.9)'
+  g.fillRect(0, 0, W, H)
+  const pad = 8 * dpr
+  const s = Math.min((W - pad * 2) / (tr.maxX - tr.minX), (H - pad * 2) / (tr.maxZ - tr.minZ))
+  const ox = (W - (tr.maxX - tr.minX) * s) / 2
+  const oz = (H - (tr.maxZ - tr.minZ) * s) / 2
+  const X = p => ox + (p.x - tr.minX) * s
+  const Z = p => oz + (p.z - tr.minZ) * s
+  g.lineCap = g.lineJoin = 'round'
+  const path = () => {
+    g.beginPath()
+    tr.pts.forEach((p, i) => (i === 0 ? g.moveTo(X(p), Z(p)) : g.lineTo(X(p), Z(p))))
+    g.closePath()
+  }
+  path()
+  g.lineWidth = 7 * dpr
+  g.strokeStyle = 'rgba(0,0,0,0.55)'
+  g.stroke()
+  path()
+  g.lineWidth = 4.5 * dpr
+  g.strokeStyle = '#9aa0a8'
+  g.stroke()
+  const p0 = tr.pts[0]
+  g.strokeStyle = '#fff'
+  g.lineWidth = 2 * dpr
+  g.beginPath()
+  g.moveTo(X(p0) - p0.tz * 4 * dpr, Z(p0) + p0.tx * 4 * dpr)
+  g.lineTo(X(p0) + p0.tz * 4 * dpr, Z(p0) - p0.tx * 4 * dpr)
+  g.stroke()
+}
+
+function buildVoteTiles (names) {
+  if (names.join('\u0000') === mapNames.join('\u0000') && voteTiles.length) return
+  mapNames = names
+  voteTiles.length = 0
+  elMapGrid.innerHTML = ''
+  names.forEach((name, idx) => {
+    const btn = document.createElement('button')
+    btn.type = 'button'
+    btn.className = 'mapTile'
+    btn.title = 'Vote for ' + name
+    const cv = document.createElement('canvas')
+    const tr = trackByName(name) || tracks[idx]
+    if (tr) drawThumb(cv, tr)
+    const nm = document.createElement('span')
+    nm.className = 'mapName'
+    nm.textContent = name
+    const cnt = document.createElement('span')
+    cnt.className = 'mapCount'
+    btn.append(cv, nm, cnt)
+    btn.addEventListener('click', () => {
+      audio.resume()
+      if (!connected || ws.readyState !== 1 || phase !== 'lobby' || !voteOpen || myVote === idx) return
+      ws.send(JSON.stringify({ t: 'vote', map: idx }))
+    })
+    elMapGrid.appendChild(btn)
+    voteTiles.push({ btn, count: cnt, name })
+  })
+  voteKey = ''
+  renderVote()
+}
+
+function applyVoteSnap (m) {
+  if (Array.isArray(m.votes)) {
+    voteTally = m.votes
+    voteOpen = !!m.voteOpen
+    voteMapIdx = typeof m.mapIdx === 'number' ? m.mapIdx : -1
+  } else if (phase !== 'lobby') {
+    voteOpen = false
+  }
+  renderVote()
+}
+
+// Only touches the DOM when something visible changed.
+function renderVote () {
+  if (!voteTiles.length) return
+  const key = voteTally.join(',') + '|' + (voteOpen ? 1 : 0) + '|' + voteMapIdx + '|' + myVote + '|' + (connected ? 1 : 0)
+  if (key === voteKey) return
+  voteKey = key
+  const max = Math.max(0, ...voteTally)
+  voteTiles.forEach((t, i) => {
+    const n = voteTally[i] || 0
+    const txt = n ? String(n) : ''
+    if (t.count.textContent !== txt) t.count.textContent = txt
+    t.btn.disabled = !voteOpen || !connected
+    t.btn.classList.toggle('lead', voteOpen && n > 0 && n === max)
+    t.btn.classList.toggle('mine', myVote === i)
+    t.btn.classList.toggle('win', !voteOpen && i === voteMapIdx)
+  })
+  const winName = mapNames[voteMapIdx] || mapName
+  elMapStatus.textContent = voteOpen
+    ? (myVote >= 0 ? 'Your vote: ' + mapNames[myVote] + ' — click another map to change it' : 'Most votes wins • ties are a coin flip')
+    : 'Voting closed — racing ' + winName
 }
 
 // ---------- track / world ----------
@@ -1353,6 +1484,7 @@ function hud (dt) {
         ? mapName + ' • you are on the grid (' + n + '/' + MAX_PLAYERS + ') — get ready!'
         : mapName + ' • ' + n + '/' + MAX_PLAYERS + ' on the grid — click JOIN RACE to enter'
     }
+    if (voteOpen) sm += ' • vote for the next map'
   } else if (phase === 'countdown') {
     pm = ''
     sm = joined ? 'Lights out and away we go…' : 'Spectating — next race opens after this one'
@@ -1399,6 +1531,7 @@ function hud (dt) {
 
   const canJoin = phase === 'lobby' && connected && !joined && ws.readyState === 1
   elJoinWrap.style.display = phase === 'lobby' && (canJoin || joined) ? 'block' : 'none'
+  elMapVote.style.display = phase === 'lobby' && voteTiles.length ? 'block' : 'none'
   elBtn.disabled = !canJoin
   elBtn.textContent = joined ? 'ON THE GRID ✓' : 'JOIN RACE'
   elName.disabled = !(connected && ws.readyState === 1)
