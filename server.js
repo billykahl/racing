@@ -7,6 +7,7 @@ import { WebSocketServer } from 'ws'
 import { tracks, TOTAL_LAPS, MAX_PLAYERS } from './shared/track.js'
 import { Coordinator, RECONCILE_MS } from './coord.js'
 import { CAR_COLORS, CAR_STYLES, clampStyle, clampColor } from './shared/cars.js'
+import { NAME_MAX, cleanName, nameProblem } from './shared/names.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const PORT = +(process.env.PORT || 8765)
@@ -29,18 +30,6 @@ const INSTANCE_ID = process.env.INSTANCE_ID || crypto.randomBytes(4).toString('h
 const STARTED = Date.now()
 
 const NAMES = ['Flash', 'Turbo', 'Blitz', 'Rocket', 'Nova', 'Comet', 'Viper', 'Ghost', 'Storm', 'Pixel', 'Mach', 'Drift', 'Bolt', 'Zippy']
-const NAME_MAX = 14
-
-// Printable characters only, no markup, collapsed whitespace, capped length.
-function cleanName (raw) {
-  if (typeof raw !== 'string') return ''
-  return raw
-    .replace(/[\u0000-\u001f\u007f-\u009f<>&"'`]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, NAME_MAX)
-}
-
 // A racer's name and car are frozen from the moment the grid locks (countdown)
 // until the results board clears; spectators can change them whenever they like.
 function customLocked (c) {
@@ -434,8 +423,9 @@ function handleMessage (c, m) {
       return
     }
     const n = cleanName(m.name)
-    if (!n) {
-      ws.send(JSON.stringify({ t: 'named', ok: false, name: c.name, why: 'Pick a name with at least one letter' }))
+    const why = nameProblem(n)
+    if (why) {
+      ws.send(JSON.stringify({ t: 'named', ok: false, name: c.name, why }))
       return
     }
     if (n !== c.name) {
@@ -693,7 +683,8 @@ function onCmd ({ inst, id, name, colorIdx, styleIdx, m }) {
   let c = clients.get(id)
   if (!c) {
     if (m.t === 'close') return
-    c = makeClient(remoteWs(id), id, cleanName(name) || 'Racer-' + id, clampColor(colorIdx), false, inst, clampStyle(styleIdx))
+    const nm = cleanName(name)
+    c = makeClient(remoteWs(id), id, nm && !nameProblem(nm) ? nm : 'Racer-' + id, clampColor(colorIdx), false, inst, clampStyle(styleIdx))
     clients.set(id, c)
   }
   if (!c.local) {
