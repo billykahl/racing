@@ -1,6 +1,6 @@
 // Procedural car model. Nose points along local +x; wheels spin around local z.
 import * as THREE from 'three'
-import { labelTexture } from './textures.js'
+import { carLabelTexture } from './textures.js'
 
 let SHARED = null
 function shared () {
@@ -135,16 +135,19 @@ export class Car {
       this.wheels.push(spin)
       if (x > 0) this.frontWheels.push(pivot)
     }
-    // Name label
+    // Floating name / place label — rivals only, never over our own car.
+    this.label = null
+    this.labelName = ''
+    this.labelPlace = 0
     if (!isSelf) {
-      const tex = labelTexture(name, '#ffffff')
-      const sm = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false })
+      const sm = new THREE.SpriteMaterial({ map: carLabelTexture(name, 0), transparent: true, depthTest: false })
       const sprite = new THREE.Sprite(sm)
-      sprite.scale.set(4.2, 1.05, 1)
+      sprite.scale.set(6.3, 1.05, 1)
       sprite.position.set(0, 2.5, 0)
       sprite.renderOrder = 10
       this.group.add(sprite)
       this.label = sprite
+      this.labelName = name
     }
     this.wheelRot = 0
     this.steerVis = 0
@@ -164,6 +167,18 @@ export class Car {
         f.scale.set(s * 1.3, s, s)
       }
     }
+  }
+
+  // Redraw the label when the driver renames or changes position (place 0 = no badge).
+  setLabel (name, place) {
+    if (!this.label) return
+    if (name === this.labelName && place === this.labelPlace) return
+    this.labelName = name
+    this.labelPlace = place
+    const old = this.label.material.map
+    this.label.material.map = carLabelTexture(name, place)
+    this.label.material.needsUpdate = true
+    if (old) old.dispose()
   }
 
   dispose () {

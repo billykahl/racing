@@ -131,6 +131,42 @@ html, body {
   display: none;
 }
 
+#nameRow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+#nameRow label {
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 2px;
+  opacity: 0.85;
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.8);
+}
+
+#nameInput {
+  width: 180px;
+  font: inherit;
+  font-size: 18px;
+  font-weight: 700;
+  text-align: center;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.45);
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-radius: 10px;
+  padding: 8px 12px;
+  outline: none;
+  backdrop-filter: blur(6px);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+#nameInput:focus { border-color: #ffd54f; box-shadow: 0 0 18px rgba(255, 213, 79, 0.35); }
+#nameInput.bad { border-color: #ef5350; }
+#nameInput:disabled { opacity: 0.6; cursor: default; }
+
 #joinBtn {
   font-size: 26px;
   font-weight: 800;

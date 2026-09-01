@@ -21,6 +21,7 @@ const elNotice = $('notice')
 const elJoinWrap = $('joinWrap')
 const elBtn = $('joinBtn')
 const elJoinMsg = $('joinMsg')
+const elName = $('nameInput')
 const elResults = $('results')
 const elOverlay = $('overlay')
 const elOverlayMsg = $('overlayMsg')
@@ -334,9 +335,34 @@ function connect () {
   }
 }
 
+// Player names are user-typed: escape them before they hit innerHTML.
+function esc (str) {
+  return String(str).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]))
+}
+
+let nameMax = 14
+let nameSent = ''
+function sendName () {
+  if (!connected || ws.readyState !== 1 || !me) return
+  const want = elName.value.trim().slice(0, nameMax)
+  if (!want) {
+    elName.value = me.name
+    return
+  }
+  if (want === me.name || want === nameSent) return
+  nameSent = want
+  ws.send(JSON.stringify({ t: 'name', name: want }))
+}
+
 function handle (m) {
   if (m.t === 'init') {
     me = { id: m.id, name: m.name, color: m.color }
+    nameMax = m.nameMax || 14
+    elName.maxLength = nameMax
+    // Reuse the name from last time; the server still gets the final say.
+    const saved = (localStorage.getItem('race.name') || '').slice(0, nameMax)
+    elName.value = saved || m.name
+    if (saved && saved !== m.name) ws.send(JSON.stringify({ t: 'name', name: saved }))
     LAPS = m.laps
     lobbySec = m.lobbySec
     graceSec = m.graceSec
@@ -351,6 +377,22 @@ function handle (m) {
     } else {
       elJoinMsg.textContent = m.why
       setTimeout(() => { elJoinMsg.textContent = '' }, 4000)
+    }
+  } else if (m.t === 'named') {
+    nameSent = ''
+    if (me) me.name = m.name
+    if (m.ok) {
+      localStorage.setItem('race.name', m.name)
+      if (document.activeElement !== elName) elName.value = m.name
+      elName.classList.remove('bad')
+    } else {
+      elName.value = m.name
+      elName.classList.add('bad')
+      elJoinMsg.textContent = m.why || 'Name not changed'
+      setTimeout(() => {
+        elName.classList.remove('bad')
+        elJoinMsg.textContent = ''
+      }, 3000)
     }
   } else if (m.t === 'left') {
     dropOwn()
@@ -367,6 +409,7 @@ function handle (m) {
     for (const c of m.cars) {
       seen.add(c.id)
       if (me && c.id === me.id) {
+        me.name = c.n
         if (own) own.slot = c.si
         if (!own && (pending || phase !== 'racing')) {
           // (re)spawn on our grid slot
@@ -556,6 +599,16 @@ elBtn.addEventListener('click', () => {
   elBtn.disabled = true
   ws.send(JSON.stringify({ t: 'join' }))
 })
+elName.addEventListener('keydown', e => {
+  e.stopPropagation()
+  if (e.code === 'Enter' || e.code === 'NumpadEnter') elName.blur()
+  if (e.code === 'Escape') {
+    elName.value = me ? me.name : ''
+    elName.blur()
+  }
+})
+elName.addEventListener('change', sendName)
+elName.addEventListener('blur', sendName)
 elLeave.addEventListener('click', () => {
   if (!connected || !joined || phase !== 'lobby') return
   ws.send(JSON.stringify({ t: 'leave' }))
@@ -1097,9 +1150,13 @@ function fmtClock (ms) {
 function rebuildStandings () {
   sorted = [...carsSnap].sort((A, B) => (B.fin - A.fin) || ((B.l + B.p) - (A.l + A.p)))
   let html = ''
+  const showPlace = phase === 'racing' || phase === 'finished'
   sorted.forEach((c, i) => {
     const self = me && c.id === me.id
-    html += `<div class="row${self ? ' self' : ''}"><span class="pos">${i + 1}</span><span class="chip" style="background:${c.col}"></span><span class="nm">${self ? '<b>' + c.n + '</b>' : c.n}</span><span class="lp">${c.fin ? '\u{1F3C1}' : 'L' + Math.min(c.l + 1, LAPS)}</span></div>`
+    html += `<div class="row${self ? ' self' : ''}"><span class="pos">${i + 1}</span><span class="chip" style="background:${c.col}"></span><span class="nm">${self ? '<b>' + esc(c.n) + '</b>' : esc(c.n)}</span><span class="lp">${c.fin ? '\u{1F3C1}' : 'L' + Math.min(c.l + 1, LAPS)}</span></div>`
+    // Place badge over every rival's car (our own car never carries a label).
+    const r = remote.get(c.id)
+    if (r && r.car) r.car.setLabel(c.n, showPlace ? i + 1 : 0)
   })
   elStand.innerHTML = html
 }
@@ -1185,6 +1242,7 @@ function hud (dt) {
   elJoinWrap.style.display = phase === 'lobby' && (canJoin || joined) ? 'block' : 'none'
   elBtn.disabled = !canJoin
   elBtn.textContent = joined ? 'ON THE GRID ✓' : 'JOIN RACE'
+  elName.disabled = !(connected && ws.readyState === 1)
   elLeave.style.display = joined && phase === 'lobby' ? 'inline-block' : 'none'
 
   let info = ''
@@ -1203,7 +1261,7 @@ function hud (dt) {
   if (res && phase === 'finished') {
     let html = '<h2>RACE RESULTS</h2>'
     for (const r of res) {
-      html += `<div class="rrow${me && r.id === me.id ? ' self' : ''}"><span class="pos${r.pos === 1 ? ' first' : ''}">${r.pos === 1 ? '\u{1F3C6}' : r.pos}</span><span class="chip" style="background:${r.color}"></span><span class="nm">${r.name}</span><span class="tm">${r.time ? fmtClock(r.time) : 'DNF (' + r.laps + '/' + LAPS + ')'}</span></div>`
+      html += `<div class="rrow${me && r.id === me.id ? ' self' : ''}"><span class="pos${r.pos === 1 ? ' first' : ''}">${r.pos === 1 ? '\u{1F3C6}' : r.pos}</span><span class="chip" style="background:${r.color}"></span><span class="nm">${esc(r.name)}</span><span class="tm">${r.time ? fmtClock(r.time) : 'DNF (' + r.laps + '/' + LAPS + ')'}</span></div>`
     }
     html += `<div class="next">${mapName} • next race in ${Math.ceil(tl)}s</div>`
     elResults.innerHTML = html

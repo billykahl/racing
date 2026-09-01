@@ -260,6 +260,70 @@ export function bannerTexture (text, bg = '#111', fg = '#fff') {
   return t
 }
 
+// Floating label over a rival's car: an optional place badge ("3rd") in
+// podium colours followed by the driver's name.
+const PLACE_COLORS = ['#ffd54f', '#e0e0e0', '#e0955b']
+export function ordinal (n) {
+  const r = n % 100
+  if (r >= 11 && r <= 13) return n + 'th'
+  return n + (['th', 'st', 'nd', 'rd'][n % 10] || 'th')
+}
+
+export function carLabelTexture (name, place = 0) {
+  const c = canvas(768, 128)
+  const g = c.getContext('2d')
+  g.clearRect(0, 0, 768, 128)
+  g.textBaseline = 'middle'
+  g.lineJoin = 'round'
+  g.lineWidth = 12
+  g.strokeStyle = 'rgba(0,0,0,0.75)'
+  const nameFont = '800 60px ui-sans-serif, system-ui, sans-serif'
+  const badgeFont = '900 62px ui-sans-serif, system-ui, sans-serif'
+  g.font = nameFont
+  let nameW = g.measureText(name).width
+  const maxName = place > 0 ? 470 : 720
+  if (nameW > maxName) {
+    // Shrink long names rather than clipping them.
+    g.font = '800 ' + Math.max(30, Math.floor(60 * maxName / nameW)) + 'px ui-sans-serif, system-ui, sans-serif'
+    nameW = g.measureText(name).width
+  }
+  const nameFontUsed = g.font
+  let badgeW = 0
+  let badge = ''
+  if (place > 0) {
+    badge = ordinal(place)
+    g.font = badgeFont
+    badgeW = g.measureText(badge).width + 44
+  }
+  const gap = place > 0 ? 22 : 0
+  let x = (768 - (badgeW + gap + nameW)) / 2
+  if (place > 0) {
+    const col = PLACE_COLORS[place - 1] || '#ffffff'
+    g.fillStyle = 'rgba(0,0,0,0.7)'
+    g.beginPath()
+    g.roundRect(x, 14, badgeW, 100, 22)
+    g.fill()
+    g.lineWidth = 5
+    g.strokeStyle = col
+    g.stroke()
+    g.font = badgeFont
+    g.textAlign = 'center'
+    g.fillStyle = col
+    g.fillText(badge, x + badgeW / 2, 66)
+    x += badgeW + gap
+    g.lineWidth = 12
+    g.strokeStyle = 'rgba(0,0,0,0.75)'
+  }
+  g.font = nameFontUsed
+  g.textAlign = 'left'
+  g.strokeText(name, x, 64)
+  g.fillStyle = '#ffffff'
+  g.fillText(name, x, 64)
+  const t = tex(c, false)
+  t.anisotropy = 8
+  return t
+}
+
 export function labelTexture (text, color = '#ffffff') {
   const c = canvas(512, 128)
   const g = c.getContext('2d')

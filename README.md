@@ -19,6 +19,13 @@ npm start          # http://localhost:8765
 Open the URL in one or more browser windows; each tab is a racer. Set `PORT` to
 run on another port. Chrome, Edge, Safari 17+ and Firefox with WebGL2 work.
 
+You get a random call sign like `Turbo-482`; type your own name in the
+**RACING AS** box next to JOIN RACE (up to 14 characters, remembered for next
+time). Names can be changed freely in the lobby, even after joining, and lock
+in the moment the countdown starts. Every rival's car carries a floating label
+with their name and, once the race is on, their current place (`1st`, `2nd`,
+…). Your own car never shows a label; your place is in the panel top right.
+
 ## Controls
 
 | Key | Action |

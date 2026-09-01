@@ -24,10 +24,11 @@ function assert (cond, msg) {
 }
 
 function mkClient (label) {
-  const c = { label, ws: new WebSocket(URL), snaps: [], joins: [], inits: [], maps: [] }
+  const c = { label, ws: new WebSocket(URL), snaps: [], joins: [], inits: [], maps: [], named: [] }
   c.ws.on('message', raw => {
     const m = JSON.parse(raw.toString())
     if (m.t === 'init') c.inits.push(m)
+    else if (m.t === 'named') c.named.push(m)
     else if (m.t === 'map') c.maps.push(m.name)
     else if (m.t === 'joined') c.joins.push(m)
     else if (m.t === 'snap') c.snaps.push(m)
@@ -66,8 +67,23 @@ assert(tracks.some(t => t.name === A.inits[0].mapName), 'init names a known map'
 await waitFor(() => last(A) && last(A).ph === 'lobby', 2000, 'lobby snap')
 assert(last(A).tl === -1, 'lobby waits (no countdown) until someone joins')
 
+// Naming: free in the lobby, sanitised, and frozen once the grid locks.
+const carOf = (c, who) => last(c).cars.find(x => x.id === who.inits[0].id)
+send(A, { t: 'name', name: '  <b>Speedy</b>   McGee-the-Fastest ' })
+assert(await waitFor(() => A.named.length === 1, 2000, 'A named'), 'rename answered')
+assert(A.named[0].ok && A.named[0].name === 'bSpeedy/b McGe', 'name is stripped of markup, whitespace-collapsed and capped at 14 chars: ' + JSON.stringify(A.named[0].name))
+send(A, { t: 'name', name: 'Speedy' })
+await waitFor(() => A.named.length === 2, 2000, 'A renamed')
+send(A, { t: 'name', name: '   ' })
+assert(await waitFor(() => A.named.length === 3, 2000, 'blank name'), 'blank name answered')
+assert(A.named[2].ok === false && A.named[2].name === 'Speedy', 'blank name rejected, previous name kept')
+
 send(A, { t: 'join' })
 assert(await waitFor(() => A.joins.length === 1 && A.joins[0].ok, 2000, 'A joined'), 'A join accepted, slot ' + (A.joins[0] && A.joins[0].slot))
+await sleep(120)
+assert(carOf(A, A) && carOf(A, A).n === 'Speedy', 'snapshot carries the chosen name')
+send(A, { t: 'name', name: 'StillLobby' })
+assert(await waitFor(() => A.named.length === 4 && A.named[3].ok, 2000, 'lobby rename'), 'a racer can still rename while the lobby is open')
 await sleep(150)
 assert(last(A).tl > 0 && last(A).tl <= 2, 'countdown started on first join')
 send(B, { t: 'join' })
@@ -78,6 +94,15 @@ send(B, { t: 'join' })
 await sleep(100)
 assert(B.joins.length === 2 && B.joins[1].ok === false, 'joining during countdown is rejected')
 assert(await waitFor(() => last(A).ph === 'racing', 4000, 'racing'), 'racing phase begins')
+send(A, { t: 'name', name: 'TooLate' })
+assert(await waitFor(() => A.named.length === 5, 2000, 'locked rename'), 'rename during the race answered')
+assert(A.named[4].ok === false && A.named[4].name === 'StillLobby' && carOf(A, A).n === 'StillLobby', 'name is locked once the race starts')
+const S = await mkClient('S')
+await waitFor(() => S.inits.length, 2000, 'spectator init')
+send(S, { t: 'name', name: 'Watcher' })
+assert(await waitFor(() => S.named.length === 1, 2000, 'spectator rename'), 'spectator rename answered')
+assert(S.named[0].ok && S.named[0].name === 'Watcher', 'a spectator can rename while a race is running')
+S.ws.close()
 
 // A drives and finishes both laps; B moves a little but never finishes.
 drive(A, 0, 0.5)
