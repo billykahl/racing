@@ -353,8 +353,26 @@ function dropFromRoster (c) {
   }
 }
 
-setInterval(tick, TICK_MS)
+const tickTimer = setInterval(tick, TICK_MS)
 
 server.listen(PORT, () => {
   console.log(`Racing server on http://localhost:${PORT}`)
 })
+
+// Vercel (and docker stop) send SIGTERM on scale-down with a 30 s grace
+// period; tell every client we are going away, close cleanly, then exit.
+let shuttingDown = false
+function shutdown (signal) {
+  if (shuttingDown) return
+  shuttingDown = true
+  console.log('[shutdown]', new Date().toISOString(), signal, 'clients:', clients.size)
+  clearInterval(tickTimer)
+  for (const c of clients.values()) {
+    if (c.ws.readyState === 1) c.ws.close(1001, 'server shutting down')
+  }
+  wss.close()
+  server.close(() => process.exit(0))
+  setTimeout(() => process.exit(0), 5000).unref()
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'))
+process.on('SIGINT', () => shutdown('SIGINT'))

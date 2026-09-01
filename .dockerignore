@@ -1,0 +1,10 @@
+node_modules
+.git
+.worktrees
+*.log
+.DS_Store
+tests
+README.md
+.gitignore
+.dockerignore
+Dockerfile*

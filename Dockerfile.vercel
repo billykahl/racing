@@ -1,0 +1,21 @@
+# Vercel auto-detects this file at the project root, builds it, and routes all
+# traffic (HTTP + WebSocket) to the resulting container function.
+# The same image runs locally:
+#   docker build -f Dockerfile.vercel -t vibe-racing . && docker run --rm -p 8765:80 vibe-racing
+
+FROM node:24-alpine AS deps
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+
+FROM node:24-alpine
+ENV NODE_ENV=production
+ENV PORT=80
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY package.json server.js ./
+COPY shared ./shared
+COPY public ./public
+EXPOSE 80
+# Runs as root (the image default): binding port 80 as a non-root user fails on Alpine.
+CMD ["node", "server.js"]
