@@ -19,6 +19,29 @@ npm start          # http://localhost:8765
 Open the URL in one or more browser windows; each tab is a racer. Set `PORT` to
 run on another port. Chrome, Edge, Safari 17+ and Firefox with WebGL2 work.
 
+## Deploy to Vercel (Docker)
+
+`Dockerfile.vercel` is auto-detected by Vercel and runs the whole game (static
+files + WebSocket server) as one container function listening on `$PORT`.
+Connect the repo in Vercel and deploy; no `vercel.json` is needed. With Docker
+installed, `vercel dev` runs the same container locally, or build and run it by
+hand:
+
+```sh
+docker build -f Dockerfile.vercel -t vibe-racing . && docker run --rm -p 8765:80 vibe-racing
+```
+
+Caveats:
+
+- Lobby state lives in memory. If Vercel scales to more than one instance,
+  players can land in different lobbies. Fine for small groups; use an
+  external store for larger ones.
+- Each WebSocket connection is capped by the function max duration (300 s on
+  Hobby, up to 800 s on Pro). The client auto-reconnects afterwards, which
+  drops a racer mid-race if it happens during a race.
+- Instances scale to zero after 5 minutes without traffic, so the first visit
+  after idle takes a cold start.
+
 You get a random call sign like `Turbo-482`; type your own name in the
 **RACING AS** box next to JOIN RACE (up to 14 characters, remembered for next
 time). Names can be changed freely in the lobby, even after joining, and lock
