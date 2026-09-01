@@ -123,8 +123,9 @@ racers can share one.
 
 | Key | Action |
 |-----|--------|
-| `←` `→` (or `A` `D`) | Steer — the car accelerates by itself once the race starts |
-| `W` (or `Shift`, `↑`) | Boost — drains the boost meter, which refills over time and faster while drifting |
+| `←` `→` (or `A` `D`) | Steer |
+| `W` (or `↑`) | Accelerate — release to coast |
+| `Shift` | Boost — ramps up the longer it is held; drains the boost meter, which refills over time and faster while drifting |
 | `S` (or `↓`) | Brake / stop, hold at a standstill to reverse |
 | `Space` | Drift — hold while steering; a long drift releases a mini-turbo |
 | `R` | Rescue: snap back onto the track if you get stuck |
