@@ -91,10 +91,10 @@ with their name and, once the race is on, their current place (`1st`, `2nd`,
 
 | Key | Action |
 |-----|--------|
-| `←` `→` (or `A`) | Steer — the car accelerates by itself once the race starts |
+| `←` `→` (or `A` `D`) | Steer — the car accelerates by itself once the race starts |
 | `W` (or `Shift`, `↑`) | Boost — drains the boost meter, which refills over time and faster while drifting |
 | `S` (or `↓`) | Brake / stop, hold at a standstill to reverse |
-| `D` (or `Space`) | Drift — hold while steering; a long drift releases a mini-turbo |
+| `Space` | Drift — hold while steering; a long drift releases a mini-turbo |
 | `R` | Rescue: snap back onto the track if you get stuck |
 | `C` | Cycle camera: chase, far chase, bonnet |
 | `M` | Mute / unmute |
