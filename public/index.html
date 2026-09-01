@@ -34,18 +34,26 @@
     <label for="nameInput">RACING AS</label>
     <input id="nameInput" type="text" maxlength="14" autocomplete="off" spellcheck="false" placeholder="Your name">
   </div>
-  <div id="mapVote">
-    <div id="mapVoteTitle">PICK A MAP</div>
-    <div id="mapVoteGrid"></div>
-    <div id="mapVoteStatus"></div>
-  </div>
-  <div id="carRow">
+  <div id="carRow" class="popCard">
+    <button id="rideCloseBtn" class="popClose" type="button" title="Close">&#x2715;</button>
     <div class="carLabel">YOUR RIDE</div>
     <div id="styleRow"></div>
     <div id="colorRow"></div>
   </div>
-  <button id="joinBtn">JOIN RACE</button>
+  <div id="btnRow">
+    <button id="mapToggleBtn" class="toggleBtn" type="button">PICK A MAP</button>
+    <button id="joinBtn">JOIN RACE</button>
+    <button id="rideToggleBtn" class="toggleBtn" type="button">YOUR RIDE</button>
+  </div>
   <div id="joinMsg"></div>
+</div>
+
+<!-- Lives outside #joinWrap: that element is transformed, which would pin a fixed child to it instead of the viewport. -->
+<div id="mapVote" class="popCard">
+  <button id="mapCloseBtn" class="popClose" type="button" title="Close">&#x2715;</button>
+  <div id="mapVoteTitle">PICK A MAP</div>
+  <div id="mapVoteGrid"></div>
+  <div id="mapVoteStatus"></div>
 </div>
 
 <div id="results" class="panel"></div>
