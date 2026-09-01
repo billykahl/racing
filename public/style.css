@@ -149,6 +149,7 @@ html, body {
   transform: translateX(-50%);
   text-align: center;
   display: none;
+  z-index: 7; /* above the HUD (#minimap, #speedo) so the ride pop-up clears it; #overlay is 20 */
 }
 
 #nameRow {
@@ -187,19 +188,50 @@ html, body {
 #nameInput.bad { border-color: #ef5350; }
 #nameInput:disabled { opacity: 0.6; cursor: default; }
 
-/* ---- lobby map vote ---- */
-/* Map vote card: mirrors the garage card on the other side so the car on the grid stays in view. */
-#mapVote {
+/* ---- lobby pop-up cards (map vote + garage) ---- */
+/* Both are hidden until their toggle button in the join row opens them; only one is open at a time. */
+.popCard {
   display: none;
-  position: absolute;
-  right: calc(100% + 28px);
-  bottom: calc(180px - 9vh); /* clears the minimap (14px + 160px) regardless of viewport height; #joinWrap sits at bottom: 9% */
-  width: 300px;
-  padding: 12px 14px 12px;
-  background: rgba(0, 0, 0, 0.45);
+  background: rgba(0, 0, 0, 0.55);
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 16px;
   backdrop-filter: blur(6px);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+}
+
+.popClose {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 26px;
+  height: 26px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 22px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.45);
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-radius: 50%;
+  cursor: pointer;
+  padding: 0;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.08s ease;
+}
+
+.popClose:hover { background: rgba(40, 44, 52, 0.7); border-color: rgba(255, 255, 255, 0.6); }
+.popClose:active { transform: scale(0.92); }
+
+/* Map vote card: centred on the screen, 4 tiles across x 2 rows. */
+#mapVote {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 540px; /* 4 x (104px thumb + 12px pad + 4px border) + 3 x 8px gap + 32px card padding */
+  max-width: 92vw;
+  padding: 14px 16px 12px;
+  text-align: center;
+  z-index: 8;
 }
 
 #mapVoteTitle {
@@ -207,12 +239,12 @@ html, body {
   font-weight: 800;
   letter-spacing: 2px;
   opacity: 0.85;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
 }
 
 #mapVoteGrid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -279,6 +311,41 @@ html, body {
   min-height: 14px;
 }
 
+#btnRow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+}
+
+.toggleBtn {
+  font: inherit;
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.45);
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-radius: 999px;
+  padding: 11px 18px;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.8);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease, transform 0.08s ease;
+}
+
+.toggleBtn:hover:not(:disabled) { background: rgba(40, 44, 52, 0.7); }
+.toggleBtn:active:not(:disabled) { transform: scale(0.96); }
+.toggleBtn.open {
+  color: #ffd54f;
+  border-color: #ffd54f;
+  background: rgba(255, 213, 79, 0.16);
+  box-shadow: 0 0 14px rgba(255, 213, 79, 0.35);
+}
+.toggleBtn:disabled { opacity: 0.5; cursor: default; }
+
 #joinBtn {
   font-size: 26px;
   font-weight: 800;
@@ -297,40 +364,23 @@ html, body {
 #joinBtn:active:not(:disabled) { transform: scale(0.97); }
 #joinBtn:disabled { background: linear-gradient(180deg, #4c554d, #39423b); cursor: default; opacity: 0.9; box-shadow: none; }
 
-/* Garage card: sits beside the join panel so the car on the grid stays in view. */
+/* Garage card: pops up above the join row, flush with its right edge (under the YOUR RIDE button). */
 #carRow {
   position: absolute;
-  left: calc(100% + 28px);
-  bottom: 0;
+  right: 0;
+  bottom: calc(100% + 12px);
   width: 232px;
-  display: flex;
   flex-direction: column;
   align-items: center;
   gap: 10px;
   padding: 12px 14px 16px;
-  background: rgba(0, 0, 0, 0.45);
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 16px;
-  backdrop-filter: blur(6px);
 }
 
 @media (max-width: 900px) {
-  #mapVote {
-    position: static;
-    width: auto;
-    max-width: 92vw;
-    margin: 0 auto 14px;
-  }
-  #mapVoteGrid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   #carRow {
-    position: static;
-    width: auto;
-    max-width: 92vw;
-    margin-bottom: 14px;
-    background: none;
-    border: none;
-    padding: 0;
-    backdrop-filter: none;
+    right: auto;
+    left: 50%;
+    transform: translateX(-50%);
   }
 }
 
@@ -563,12 +613,15 @@ html, body {
   border-radius: 10px;
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
   pointer-events: none;
-  z-index: 6;
+  z-index: 9; /* above the lobby pop-ups (7/8) so it is never hidden; still under #overlay */
 }
 
 @media (max-width: 720px) {
+  #mapVote { width: auto; min-width: 260px; }
   #mapVoteGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .mapTile canvas { width: 92px; height: 56px; }
+  #btnRow { flex-wrap: wrap; gap: 8px; }
+  #joinBtn { order: -1; flex-basis: 100%; }
   #standings { display: none; }
   #hint { display: none; }
   #minimap { width: 160px; height: 106px; }

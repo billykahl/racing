@@ -26,6 +26,11 @@ const elJoinMsg = $('joinMsg')
 const elMapVote = $('mapVote')
 const elMapGrid = $('mapVoteGrid')
 const elMapStatus = $('mapVoteStatus')
+const elMapToggle = $('mapToggleBtn')
+const elMapClose = $('mapCloseBtn')
+const elCarRow = $('carRow')
+const elRideToggle = $('rideToggleBtn')
+const elRideClose = $('rideCloseBtn')
 const elName = $('nameInput')
 const elStyleRow = $('styleRow')
 const elColorRow = $('colorRow')
@@ -430,6 +435,27 @@ function setPickerLocked (locked) {
   for (const b of swatchBtns) b.disabled = locked
 }
 
+// ---------- lobby pop-ups ----------
+// Which card is open: '' (none), 'map' or 'ride'. Only one at a time; the frame loop
+// hides both whenever the lobby UI is not showing (phase change, disconnect).
+let openPanel = ''
+function togglePanel (name) {
+  openPanel = openPanel === name ? '' : name
+}
+function closePanels () {
+  openPanel = ''
+}
+elMapToggle.addEventListener('click', () => {
+  togglePanel('map')
+  elMapToggle.blur()
+})
+elRideToggle.addEventListener('click', () => {
+  togglePanel('ride')
+  elRideToggle.blur()
+})
+elMapClose.addEventListener('click', closePanels)
+elRideClose.addEventListener('click', closePanels)
+
 function loadSavedCar () {
   try {
     const v = JSON.parse(localStorage.getItem('race.car') || 'null')
@@ -832,6 +858,7 @@ addEventListener('keydown', e => {
     if (e.code === 'KeyR') rescue()
     if (e.code === 'KeyC') cameraMode = (cameraMode + 1) % 3
     if (e.code === 'KeyM') toggleMute()
+    if (e.code === 'Escape') closePanels()
     if (e.code === 'KeyX') {
       setLookBehind(true)
       e.preventDefault()
@@ -908,6 +935,7 @@ elName.addEventListener('keydown', e => {
   if (e.code === 'Escape') {
     elName.value = me ? me.name : ''
     elName.blur()
+    closePanels()
   }
 })
 elName.addEventListener('change', sendName)
@@ -1606,8 +1634,14 @@ function hud (dt) {
   }
 
   const canJoin = phase === 'lobby' && connected && !joined && ws.readyState === 1
-  elJoinWrap.style.display = phase === 'lobby' && (canJoin || joined) ? 'block' : 'none'
-  elMapVote.style.display = phase === 'lobby' && voteTiles.length ? 'block' : 'none'
+  const lobbyUI = phase === 'lobby' && (canJoin || joined)
+  if (!lobbyUI) openPanel = ''
+  elJoinWrap.style.display = lobbyUI ? 'block' : 'none'
+  elMapVote.style.display = lobbyUI && voteTiles.length && openPanel === 'map' ? 'block' : 'none'
+  elCarRow.style.display = lobbyUI && openPanel === 'ride' ? 'flex' : 'none'
+  elMapToggle.disabled = !voteTiles.length
+  elMapToggle.classList.toggle('open', openPanel === 'map')
+  elRideToggle.classList.toggle('open', openPanel === 'ride')
   elBtn.disabled = !canJoin
   elBtn.textContent = joined ? 'ON THE GRID ✓' : 'JOIN RACE'
   elName.disabled = !(connected && ws.readyState === 1)
