@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { WebSocketServer } from 'ws'
 import { tracks, TOTAL_LAPS, MAX_PLAYERS } from './shared/track.js'
 import { Coordinator, RECONCILE_MS } from './coord.js'
+import { CAR_COLORS, CAR_STYLES, clampStyle, clampColor } from './shared/cars.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const PORT = +(process.env.PORT || 8765)
@@ -14,6 +15,9 @@ const COUNTDOWN_SEC = +(process.env.COUNTDOWN_SEC || 4) // grid lock + lights
 const RESULTS_SEC = +(process.env.RESULTS_SEC || 10)
 const GRACE_SEC = +(process.env.GRACE_SEC || 30)      // time the rest get once the leader finishes
 const HARD_CAP_SEC = +(process.env.HARD_CAP_SEC || 300)
+// Map vote closes this long before the lobby countdown ends; capped so short
+// test timers still leave a voting window.
+const VOTE_CLOSE_SEC = Math.min(+(process.env.VOTE_CLOSE_SEC || 8), LOBBY_SEC * 0.4)
 const TICK_MS = 50
 // With a Redis URL set, every instance sharing that Redis presents one lobby
 // (see coord.js). Unset: this process is the whole world, all in memory.
@@ -24,7 +28,6 @@ const REDIS_URL = REDIS_VAR ? process.env[REDIS_VAR] : ''
 const INSTANCE_ID = process.env.INSTANCE_ID || crypto.randomBytes(4).toString('hex')
 const STARTED = Date.now()
 
-const COLORS = ['#e53935', '#1e88e5', '#43a047', '#fdd835', '#fb8c00', '#8e24aa', '#00acc1', '#ec407a', '#f5f5f5', '#546e7a', '#7cb342', '#ffb300', '#3949ab', '#d81b60']
 const NAMES = ['Flash', 'Turbo', 'Blitz', 'Rocket', 'Nova', 'Comet', 'Viper', 'Ghost', 'Storm', 'Pixel', 'Mach', 'Drift', 'Bolt', 'Zippy']
 const NAME_MAX = 14
 
@@ -38,9 +41,9 @@ function cleanName (raw) {
     .slice(0, NAME_MAX)
 }
 
-// A racer's name is frozen from the moment the grid locks (countdown) until
-// the results board clears; spectators can rename whenever they like.
-function nameLocked (c) {
+// A racer's name and car are frozen from the moment the grid locks (countdown)
+// until the results board clears; spectators can change them whenever they like.
+function customLocked (c) {
   return c.inRace && state.phase !== 'lobby'
 }
 
@@ -144,7 +147,10 @@ const state = {
   phaseEnds: null, // null while the lobby waits for the first racer
   raceStart: 0,
   graceStart: null,
-  results: null
+  results: null,
+  votes: new Map(), // lobby map vote: clientId -> track index
+  voteClosed: false, // set once the vote has been resolved for this lobby
+  votePruneAt: 0 // leader failover: when to drop votes from clients that never re-announced
 }
 
 const trackOrder = [...tracks.keys()]
@@ -162,6 +168,54 @@ function nextTrack () {
   broadcast({ t: 'map', name: track.name })
 }
 
+// ---------- lobby map vote ----------
+
+function voteTally () {
+  const tally = new Array(tracks.length).fill(0)
+  for (const idx of state.votes.values()) tally[idx]++
+  return tally
+}
+
+function trackIndexOf (m) {
+  if (typeof m === 'number') return Number.isInteger(m) ? m : -1
+  if (typeof m === 'string') return tracks.findIndex(t => t.name === m)
+  return -1
+}
+
+// Runs once per lobby countdown, VOTE_CLOSE_SEC before it ends. Most votes
+// win, ties are broken at random, no votes keeps the rotation's pick.
+function resolveVote () {
+  state.voteClosed = true
+  const tally = voteTally()
+  const max = Math.max(0, ...tally)
+  const cur = tracks.indexOf(track)
+  let win = cur
+  if (max > 0) {
+    const tied = []
+    tally.forEach((n, i) => { if (n === max) tied.push(i) })
+    win = tied[Math.floor(Math.random() * tied.length)]
+  }
+  console.log('[map-vote]', new Date().toISOString(), 'tally', tracks.map((t, i) => `${t.name}=${tally[i]}`).join(' '),
+    '->', tracks[win].name, max === 0 ? '(no votes, rotation kept)' : win === cur ? '(current map)' : '')
+  if (win === cur) return
+  trackPtr = trackOrder.indexOf(win)
+  track = tracks[win]
+  roster.forEach((id, i) => {
+    const c = clients.get(id)
+    if (c) resetCar(c, i)
+  })
+  broadcast({ t: 'map', name: track.name })
+}
+
+// Vote fields for `snap`/`init`; empty outside the lobby to keep snaps small.
+function voteFields (out) {
+  if (state.phase !== 'lobby') return out
+  out.votes = voteTally()
+  out.voteOpen = !state.voteClosed
+  out.mapIdx = tracks.indexOf(track)
+  return out
+}
+
 function broadcast (obj) {
   const data = JSON.stringify(obj)
   for (const c of clients.values()) {
@@ -170,12 +224,13 @@ function broadcast (obj) {
   if (coord) coord.queueBcast(data)
 }
 
-function makeClient (ws, id, name, colorIdx, local, inst) {
+function makeClient (ws, id, name, colorIdx, local, inst, styleIdx = 0) {
   return {
     ws,
     id,
     name,
     colorIdx,
+    styleIdx,
     local,
     inst, // instance hosting the socket (null until a remote client is heard from)
     seen: Date.now(),
@@ -224,7 +279,8 @@ function finishRace () {
     pos: i + 1,
     id: c.id,
     name: c.name,
-    color: COLORS[c.colorIdx],
+    color: CAR_COLORS[c.colorIdx],
+    style: c.styleIdx,
     time: c.car.fin ? c.car.finT : 0,
     laps: c.car.lap
   }))
@@ -247,6 +303,8 @@ function openLobby () {
   roster.forEach((id, i) => resetCar(clients.get(id), i))
   for (const c of clients.values()) c.inRace = roster.includes(c.id)
   state.phaseEnds = roster.length > 0 ? now + LOBBY_SEC * 1000 : null
+  state.votes.clear()
+  state.voteClosed = false
   nextTrack()
 }
 
@@ -255,6 +313,7 @@ function tick () {
   const now = Date.now()
   if (coord) sweepRemote(now)
   if (state.phase === 'lobby') {
+    if (!state.voteClosed && state.phaseEnds !== null && now >= state.phaseEnds - VOTE_CLOSE_SEC * 1000) resolveVote()
     if (state.phaseEnds !== null && now >= state.phaseEnds) {
       if (roster.length > 0) {
         state.phase = 'countdown'
@@ -299,7 +358,8 @@ function tick () {
       id,
       si: i,
       n: c.name,
-      col: COLORS[c.colorIdx],
+      col: CAR_COLORS[c.colorIdx],
+      sty: c.styleIdx,
       x: +c.car.x.toFixed(2),
       z: +c.car.z.toFixed(2),
       a: +c.car.a.toFixed(3),
@@ -310,7 +370,7 @@ function tick () {
       fin: c.car.fin ? 1 : 0
     })
   })
-  broadcast({
+  broadcast(voteFields({
     t: 'snap',
     ph: state.phase,
     tl: state.phaseEnds === null ? -1 : Math.max(0, (state.phaseEnds - now) / 1000),
@@ -318,7 +378,7 @@ function tick () {
     clock: state.phase === 'racing' ? now - state.raceStart : 0,
     cars,
     res: state.results
-  })
+  }))
   const list = presence()
   const key = JSON.stringify(list)
   if (key !== lastWho || now - lastWhoAt >= WHO_MS) {
@@ -342,11 +402,11 @@ function presence () {
     const c = clients.get(id)
     if (!c) continue
     const st = over || c.car.fin ? 'fin' : state.phase === 'racing' ? 'race' : 'grid'
-    list.push({ id: c.id, n: c.name, col: COLORS[c.colorIdx], st, l: c.car.lap, fin: c.car.fin ? 1 : 0 })
+    list.push({ id: c.id, n: c.name, col: CAR_COLORS[c.colorIdx], st, l: c.car.lap, fin: c.car.fin ? 1 : 0 })
   }
   const rosterIds = new Set(roster)
   const specs = [...clients.values()].filter(c => !rosterIds.has(c.id)).sort((a, b) => a.id - b.id)
-  for (const c of specs) list.push({ id: c.id, n: c.name, col: COLORS[c.colorIdx], st: 'spec', l: 0, fin: 0 })
+  for (const c of specs) list.push({ id: c.id, n: c.name, col: CAR_COLORS[c.colorIdx], st: 'spec', l: 0, fin: 0 })
   return list
 }
 
@@ -369,7 +429,7 @@ function handleMessage (c, m) {
     ws.send(JSON.stringify({ t: 'joined', ok: true, slot: c.slot }))
     console.log('[join]', c.name, 'slot', c.slot, 'roster', roster.length)
   } else if (m.t === 'name') {
-    if (nameLocked(c)) {
+    if (customLocked(c)) {
       ws.send(JSON.stringify({ t: 'named', ok: false, name: c.name, why: 'Names are locked once the race starts' }))
       return
     }
@@ -383,10 +443,39 @@ function handleMessage (c, m) {
       c.name = n
     }
     ws.send(JSON.stringify({ t: 'named', ok: true, name: c.name }))
+  } else if (m.t === 'car') {
+    if (customLocked(c)) {
+      ws.send(JSON.stringify({ t: 'car', ok: false, style: c.styleIdx, color: c.colorIdx, why: 'Your car is locked once the race starts' }))
+      return
+    }
+    const style = clampStyle(m.style)
+    const color = clampColor(m.color)
+    if (style !== c.styleIdx || color !== c.colorIdx) {
+      console.log('[car]', c.name, CAR_STYLES[style].id + '->' + CAR_COLORS[color])
+      c.styleIdx = style
+      c.colorIdx = color
+    }
+    ws.send(JSON.stringify({ t: 'car', ok: true, style: c.styleIdx, color: c.colorIdx }))
   } else if (m.t === 'leave') {
     if (!c.inRace || state.phase !== 'lobby') return
     dropFromRoster(c)
     ws.send(JSON.stringify({ t: 'left' }))
+  } else if (m.t === 'vote') {
+    if (state.phase !== 'lobby') {
+      ws.send(JSON.stringify({ t: 'voted', ok: false, why: 'Map voting is only open in the lobby' }))
+      return
+    }
+    if (state.voteClosed) {
+      ws.send(JSON.stringify({ t: 'voted', ok: false, why: 'Voting has closed — racing ' + track.name }))
+      return
+    }
+    const idx = trackIndexOf(m.map)
+    if (idx < 0 || idx >= tracks.length) {
+      ws.send(JSON.stringify({ t: 'voted', ok: false, why: 'Unknown map' }))
+      return
+    }
+    state.votes.set(c.id, idx) // a second vote replaces the first
+    ws.send(JSON.stringify({ t: 'voted', ok: true, map: idx }))
   } else if (m.t === 'st' && c.inRace && Array.isArray(m.q)) {
     const q = m.q
     c.car.x = +q[0] || 0
@@ -412,6 +501,7 @@ function handleMessage (c, m) {
 
 function handleClose (c) {
   clients.delete(c.id)
+  state.votes.delete(c.id)
   if (c.inRace) dropFromRoster(c)
 }
 
@@ -422,7 +512,7 @@ wss.on('connection', async ws => {
     try {
       const a = await coord.admit()
       id = a.id
-      colorIdx = a.colorRaw % COLORS.length
+      colorIdx = a.colorRaw % CAR_COLORS.length
       if (!coord.leader) view = a.meta || { ph: 'lobby', phaseEnds: null, track: track.name }
     } catch (e) {
       console.error('[coord] admit failed:', e.message)
@@ -432,23 +522,26 @@ wss.on('connection', async ws => {
     if (ws.readyState !== 1) return
   } else {
     id = nextId++
-    colorIdx = nextColor++ % COLORS.length
+    colorIdx = nextColor++ % CAR_COLORS.length
   }
   const name = NAMES[(id - 1) % NAMES.length] + '-' + String(100 + Math.floor(Math.random() * 900))
-  const c = makeClient(ws, id, name, colorIdx, true, INSTANCE_ID)
+  const c = makeClient(ws, id, name, colorIdx, true, INSTANCE_ID, 0)
   clients.set(id, c)
 
   const ph = view ? view.ph : state.phase
   const ends = view ? view.phaseEnds : state.phaseEnds
-  ws.send(JSON.stringify({
+  const init = {
     t: 'init',
     id,
     name: c.name,
-    color: COLORS[c.colorIdx],
+    color: CAR_COLORS[c.colorIdx],
+    colorIdx: c.colorIdx,
+    styleIdx: c.styleIdx,
     nameMax: NAME_MAX,
     laps: TOTAL_LAPS,
     maxPlayers: MAX_PLAYERS,
     mapName: view ? view.track : track.name,
+    maps: tracks.map(t => t.name),
     lobbySec: LOBBY_SEC,
     graceSec: GRACE_SEC,
     ph,
@@ -456,7 +549,16 @@ wss.on('connection', async ws => {
     shared: !!coord,
     inst: INSTANCE_ID,
     leader: !coord || coord.leader
-  }))
+  }
+  if (!view) voteFields(init)
+  else if (view.ph === 'lobby') {
+    // Follower: the leader's tally as of the last meta write; snaps refresh it.
+    init.votes = new Array(tracks.length).fill(0)
+    for (const [, idx] of view.votes || []) if (init.votes[idx] !== undefined) init.votes[idx]++
+    init.voteOpen = !view.voteClosed
+    init.mapIdx = tracks.findIndex(t => t.name === view.track)
+  }
+  ws.send(JSON.stringify(init))
   if (coord && !coord.leader) coord.forward(c, { t: 'hello' })
 
   ws.on('message', raw => {
@@ -491,7 +593,10 @@ function dropFromRoster (c) {
       const o = clients.get(id)
       if (o) resetCar(o, i)
     })
-    if (roster.length === 0) state.phaseEnds = null
+    if (roster.length === 0) {
+      state.phaseEnds = null
+      state.voteClosed = false // the countdown restarts, so does the vote
+    }
   }
 }
 
@@ -505,14 +610,21 @@ function metaSnapshot () {
     graceStart: state.graceStart,
     results: state.results,
     track: track.name,
+    votes: [...state.votes],
+    voteClosed: state.voteClosed,
     roster: roster.map(id => clients.get(id)).filter(Boolean)
-      .map(c => ({ id: c.id, name: c.name, colorIdx: c.colorIdx, slot: c.slot, moved: c.moved, car: c.car }))
+      .map(c => ({ id: c.id, name: c.name, colorIdx: c.colorIdx, styleIdx: c.styleIdx, slot: c.slot, moved: c.moved, car: c.car }))
   }
 }
 
 // Remote clients whose instance went silent, or restored racers nobody
 // re-announced after a failover, leave the same way a closed socket does.
 function sweepRemote (now) {
+  if (state.votePruneAt && now >= state.votePruneAt) {
+    // Restored votes from clients that never re-announced after a failover.
+    state.votePruneAt = 0
+    for (const id of [...state.votes.keys()]) if (!clients.has(id)) state.votes.delete(id)
+  }
   for (const c of [...clients.values()]) {
     if (c.local) continue
     const gone = c.inst === null ? now - c.seen > RECONCILE_MS : coord.peerStale(c.inst, now)
@@ -536,12 +648,20 @@ function becomeLeader (meta) {
   state.raceStart = 0
   state.graceStart = null
   state.results = null
+  state.votes.clear()
+  state.voteClosed = false
+  state.votePruneAt = 0
   if (!meta) return
   state.phase = meta.ph
   state.phaseEnds = meta.phaseEnds
   state.raceStart = meta.raceStart
   state.graceStart = meta.graceStart
   state.results = meta.results
+  for (const [id, idx] of meta.votes || []) {
+    if (Number.isInteger(idx) && idx >= 0 && idx < tracks.length) state.votes.set(id, idx)
+  }
+  state.voteClosed = !!meta.voteClosed
+  state.votePruneAt = Date.now() + RECONCILE_MS
   const ti = tracks.findIndex(t => t.name === meta.track)
   if (ti !== -1) {
     trackPtr = trackOrder.indexOf(ti)
@@ -550,10 +670,12 @@ function becomeLeader (meta) {
   for (const r of meta.roster) {
     let c = clients.get(r.id)
     if (!c) {
-      c = makeClient(remoteWs(r.id), r.id, r.name, r.colorIdx, false, null)
+      c = makeClient(remoteWs(r.id), r.id, r.name, clampColor(r.colorIdx), false, null, clampStyle(r.styleIdx))
       clients.set(r.id, c)
     }
     c.name = r.name
+    if (r.colorIdx !== undefined) c.colorIdx = clampColor(r.colorIdx)
+    c.styleIdx = clampStyle(r.styleIdx)
     c.inRace = true
     c.slot = r.slot
     c.moved = r.moved
@@ -567,11 +689,11 @@ function stopLeading () {
   roster = []
 }
 
-function onCmd ({ inst, id, name, colorIdx, m }) {
+function onCmd ({ inst, id, name, colorIdx, styleIdx, m }) {
   let c = clients.get(id)
   if (!c) {
     if (m.t === 'close') return
-    c = makeClient(remoteWs(id), id, cleanName(name) || 'Racer-' + id, (+colorIdx | 0) % COLORS.length, false, inst)
+    c = makeClient(remoteWs(id), id, cleanName(name) || 'Racer-' + id, clampColor(colorIdx), false, inst, clampStyle(styleIdx))
     clients.set(id, c)
   }
   if (!c.local) {
@@ -596,11 +718,15 @@ function onReply (to, str) {
   const c = clients.get(to)
   if (!c || !c.local) return
   if (c.ws.readyState === 1) c.ws.send(str)
-  // Keep the follower's copy of the name current so a re-announce after a
-  // leader change carries the chosen name, not the random one.
+  // Keep the follower's copy of the name and car current so a re-announce
+  // after a leader change carries the chosen ones, not the defaults.
   try {
     const m = JSON.parse(str)
     if (m.t === 'named' && m.ok) c.name = m.name
+    else if (m.t === 'car' && m.ok) {
+      c.styleIdx = clampStyle(m.style)
+      c.colorIdx = clampColor(m.color)
+    }
   } catch {}
 }
 

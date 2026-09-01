@@ -112,6 +112,13 @@ in the moment the countdown starts. Every rival's car carries a floating label
 with their name and, once the race is on, their current place (`1st`, `2nd`,
 …). Your own car never shows a label; your place is in the panel top right.
 
+The join panel also lets you pick a car: one of four body styles (**Racer**,
+**Muscle**, **Buggy**, **Van**) and one of 14 paint colours. The choice is
+remembered for next time, can be changed freely in the lobby, even after
+joining, and locks in the moment the countdown starts; everyone sees each
+racer in the style and colour they picked. Colours are not exclusive, so two
+racers can share one.
+
 ## Controls
 
 | Key | Action |
@@ -132,13 +139,14 @@ bounce you off and bleed speed on impact.
 
 | Phase       | Duration            | What happens |
 |-------------|---------------------|--------------|
-| `lobby`     | until someone joins, then 30 s | JOIN RACE is live, cars park on the grid, spectators orbit the track |
+| `lobby`     | until someone joins, then 30 s | JOIN RACE is live, cars park on the grid, spectators orbit the track. Everyone (racers and spectators) can **vote for the next map** in the PICK A MAP panel; the vote closes 8 s before the countdown, most votes wins, ties are random, no votes keeps the rotation's pick |
 | `countdown` | 4 s                 | Grid locked, gantry lights, 3-2-1-GO |
 | `racing`    | 2 laps              | First across the line starts a **30 s** finish window for everyone else |
 | `finished`  | 10 s                | Results board (DNF for anyone who ran out of time) |
 
 After the results everyone who actually drove is put straight back on the grid
-for the next race on the next circuit (four circuits rotate). Racers who never
+for the next race on the next circuit (the circuits rotate unless a lobby vote
+picks a different one). Racers who never
 moved (disconnected keyboard, tabbed away) are dropped to spectator so an idle
 car never blocks the lobby. A 300 s hard cap ends a race even if nobody finishes.
 

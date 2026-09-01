@@ -6,12 +6,13 @@ import { spawn, execSync } from 'node:child_process'
 import WebSocket from 'ws'
 import Redis from 'ioredis'
 import { TOTAL_LAPS } from '../shared/track.js'
+import { CAR_COLORS } from '../shared/cars.js'
 
 const REDIS_PORT = +(process.env.TEST_REDIS_PORT || 6399)
 const REDIS_URL = 'redis://127.0.0.1:' + REDIS_PORT
 const CONTAINER = 'racing-test-redis-' + REDIS_PORT
 const PORTS = { s1: +(process.env.SHARED_PORT_A || 8801), s2: +(process.env.SHARED_PORT_B || 8802) }
-const TIMERS = { LOBBY_SEC: 2, COUNTDOWN_SEC: 1, RESULTS_SEC: 2, GRACE_SEC: 3, HARD_CAP_SEC: 4 }
+const TIMERS = { LOBBY_SEC: 2, COUNTDOWN_SEC: 1, RESULTS_SEC: 2, GRACE_SEC: 3, HARD_CAP_SEC: 4, VOTE_CLOSE_SEC: 1 }
 let failures = 0
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 
@@ -92,11 +93,13 @@ function cleanup () {
 process.on('exit', cleanup)
 
 function mkClient (label, port) {
-  const c = { label, port, ws: new WebSocket('ws://localhost:' + port), snaps: [], joins: [], inits: [], maps: [], named: [], whos: [], closed: false }
+  const c = { label, port, ws: new WebSocket('ws://localhost:' + port), snaps: [], joins: [], inits: [], maps: [], named: [], cars: [], voted: [], whos: [], closed: false }
   c.ws.on('message', raw => {
     const m = JSON.parse(raw.toString())
     if (m.t === 'init') c.inits.push(m)
     else if (m.t === 'named') c.named.push(m)
+    else if (m.t === 'car') c.cars.push(m)
+    else if (m.t === 'voted') c.voted.push(m)
     else if (m.t === 'map') c.maps.push(m.name)
     else if (m.t === 'joined') c.joins.push(m)
     else if (m.t === 'snap') c.snaps.push(m)
@@ -165,6 +168,21 @@ assert(await waitFor(() => whoOf(A, A) && whoOf(A, B) && whoOf(B, A) && whoOf(B,
 send(B, { t: 'name', name: 'Relayed' })
 assert(await waitFor(() => B.named.length === 1, 2000, 'B named'), 'rename over the relay answered')
 assert(B.named[0] && B.named[0].ok && B.named[0].name === 'Relayed', 'relayed rename applied')
+send(B, { t: 'car', style: 3, color: 9 })
+assert(await waitFor(() => B.cars.length === 1, 2000, 'B car'), 'car pick over the relay answered')
+assert(B.cars[0] && B.cars[0].ok && B.cars[0].style === 3 && B.cars[0].color === 9, 'relayed car pick applied')
+
+// Map vote relayed across instances and mirrored into race:meta.
+const mapList = A.inits[0].maps
+const votedIdx = mapList.findIndex(n => n !== A.inits[0].mapName)
+send(B, { t: 'vote', map: votedIdx })
+assert(await waitFor(() => B.voted.length === 1, 2000, 'B voted'), 'vote over the relay answered')
+assert(B.voted[0] && B.voted[0].ok && B.voted[0].map === votedIdx, 'relayed vote accepted for ' + mapList[votedIdx])
+assert(await waitFor(() => last(A).votes && last(A).votes[votedIdx] === 1 && last(B).votes && last(B).votes[votedIdx] === 1, 1500, 'tally on both'), 'both instances show the vote in their snapshots')
+assert(await waitFor(async () => {
+  const meta = JSON.parse(await redis.get('race:meta') || '{}')
+  return Array.isArray(meta.votes) && meta.votes.some(([id, idx]) => id === idOf(B) && idx === votedIdx)
+}, 2500, 'meta votes'), 'race:meta carries the vote for failover')
 
 send(A, { t: 'join' })
 assert(await waitFor(() => A.joins.length === 1 && A.joins[0].ok, 2000, 'A joined'), 'A join accepted on :' + PORTS.s1)
@@ -177,9 +195,11 @@ assert(await waitFor(() => last(A).cars.length === 2 && last(B).cars.length === 
   const sb = last(B).cars.map(c => c.si).sort()
   assert(sa.join() === '0,1' && sb.join() === '0,1', 'cars have distinct slots on both: ' + sa + ' / ' + sb)
   assert(carOf(A, B) && carOf(A, B).n === 'Relayed', 'A sees B under the relayed name')
+  assert(carOf(A, B) && carOf(A, B).sty === 3 && carOf(A, B).col === CAR_COLORS[9], 'A sees B in the relayed car style and colour')
 }
 
 assert(await waitFor(() => last(A).ph === 'racing' && last(B).ph === 'racing', 6000, 'racing'), 'race starts on both')
+assert(A.maps.at(-1) === mapList[votedIdx] && B.maps.at(-1) === mapList[votedIdx], 'the voted map is raced on both instances: ' + A.maps.at(-1))
 const C = await mkClient('C', PORTS[follower0])
 await waitFor(() => C.inits.length, 2000, 'C init')
 assert(C.inits[0] && C.inits[0].ph === 'racing', 'late arrival on the follower is told the race is on (init.ph=' + (C.inits[0] && C.inits[0].ph) + ')')
@@ -205,7 +225,7 @@ assert(JSON.stringify(last(A).res) === JSON.stringify(last(B).res), 'identical r
 assert(last(A).res && last(A).res[0].id === idOf(A) && last(A).res[1].id === idOf(B) && last(A).res[1].time === 0, 'winner and DNF ranked as expected')
 assert(await waitFor(() => last(A).ph === 'lobby' && last(B).ph === 'lobby', 5000, 'lobby again'), 'lobby reopens on both')
 await sleep(150)
-assert(A.maps.length >= 1 && B.maps.length >= 1 && A.maps.at(-1) === B.maps.at(-1) && A.maps.at(-1) !== A.inits[0].mapName, 'map rotated identically on both: ' + A.maps.at(-1))
+assert(A.maps.length >= 2 && B.maps.length >= 2 && A.maps.at(-1) === B.maps.at(-1) && A.maps.at(-1) !== mapList[votedIdx], 'map rotated identically on both: ' + A.maps.at(-1))
 assert(last(A).cars.length === 2 && last(B).cars.length === 2, 'both racers kept on the grid on both instances')
 C.ws.close()
 assert(await waitFor(() => !whoOf(A, C) && !whoOf(B, C), 1500, 'C gone from who'), 'closed spectator on the follower disappears from who on both instances')
@@ -224,6 +244,7 @@ assert(await waitFor(() => S.snaps.length > n0 + 5, 6000, 'snapshots resume'), '
 assert(await waitFor(() => logs[survivor].some(l => l.startsWith('[leader] ' + survivor)), 2000, 'survivor election log'), 'survivor ' + survivor + ' took the lease')
 assert(await waitFor(() => victim.closed, 2000, 'victim closed'), 'client on the dead instance lost its socket')
 assert(await waitFor(() => last(S).cars.length === 1 && last(S).cars[0].id === idOf(S), 5000, 'ghost dropped'), 'racer from the dead instance is dropped from the grid')
+assert(carOf(S, S) && carOf(S, S).sty === (S === B ? 3 : 0), 'surviving racer keeps its car style across the failover')
 assert(await waitFor(() => last(S).ph === 'racing', 8000, 'race after failover'), 'phase keeps advancing: race starts after failover')
 assert(await waitFor(() => last(S).ph === 'finished', 8000, 'finish after failover'), 'race finishes after failover')
 assert(await waitFor(() => last(S).ph === 'lobby', 5000, 'lobby after failover'), 'lobby reopens after failover')

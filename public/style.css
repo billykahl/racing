@@ -187,6 +187,98 @@ html, body {
 #nameInput.bad { border-color: #ef5350; }
 #nameInput:disabled { opacity: 0.6; cursor: default; }
 
+/* ---- lobby map vote ---- */
+/* Map vote card: mirrors the garage card on the other side so the car on the grid stays in view. */
+#mapVote {
+  display: none;
+  position: absolute;
+  right: calc(100% + 28px);
+  bottom: calc(180px - 9vh); /* clears the minimap (14px + 160px) regardless of viewport height; #joinWrap sits at bottom: 9% */
+  width: 300px;
+  padding: 12px 14px 12px;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 16px;
+  backdrop-filter: blur(6px);
+}
+
+#mapVoteTitle {
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 2px;
+  opacity: 0.85;
+  margin-bottom: 8px;
+}
+
+#mapVoteGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.mapTile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 6px 5px;
+  font: inherit;
+  color: #f2f4f2;
+  background: rgba(0, 0, 0, 0.45);
+  border: 2px solid rgba(255, 255, 255, 0.18);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.08s ease;
+}
+
+.mapTile:hover:not(:disabled) { border-color: rgba(255, 255, 255, 0.5); transform: translateY(-1px); }
+.mapTile:disabled { cursor: default; opacity: 0.55; }
+.mapTile.lead { border-color: rgba(255, 213, 79, 0.55); }
+.mapTile.mine { border-color: #ffd54f; box-shadow: 0 0 16px rgba(255, 213, 79, 0.35); }
+.mapTile.win { border-color: #38c956; box-shadow: 0 0 18px rgba(56, 201, 86, 0.45); opacity: 1; }
+
+.mapTile canvas {
+  width: 104px;
+  height: 64px;
+  max-width: 100%;
+  border-radius: 6px;
+  display: block;
+}
+
+.mapTile .mapName {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.mapTile .mapCount {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  min-width: 20px;
+  padding: 1px 6px;
+  font-size: 11px;
+  font-weight: 800;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.7);
+  color: #ffd54f;
+}
+
+.mapTile .mapCount:empty { display: none; }
+
+#mapVoteStatus {
+  margin-top: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 0.85;
+  min-height: 14px;
+}
+
 #joinBtn {
   font-size: 26px;
   font-weight: 800;
@@ -204,6 +296,107 @@ html, body {
 #joinBtn:hover:not(:disabled) { transform: scale(1.05); filter: brightness(1.1); }
 #joinBtn:active:not(:disabled) { transform: scale(0.97); }
 #joinBtn:disabled { background: linear-gradient(180deg, #4c554d, #39423b); cursor: default; opacity: 0.9; box-shadow: none; }
+
+/* Garage card: sits beside the join panel so the car on the grid stays in view. */
+#carRow {
+  position: absolute;
+  left: calc(100% + 28px);
+  bottom: 0;
+  width: 232px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px 16px;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 16px;
+  backdrop-filter: blur(6px);
+}
+
+@media (max-width: 900px) {
+  #mapVote {
+    position: static;
+    width: auto;
+    max-width: 92vw;
+    margin: 0 auto 14px;
+  }
+  #mapVoteGrid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  #carRow {
+    position: static;
+    width: auto;
+    max-width: 92vw;
+    margin-bottom: 14px;
+    background: none;
+    border: none;
+    padding: 0;
+    backdrop-filter: none;
+  }
+}
+
+#carRow .carLabel {
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 2px;
+  opacity: 0.85;
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.8);
+}
+
+#styleRow, #colorRow {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 6px;
+}
+
+#colorRow { max-width: 232px; }
+#styleRow { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; width: 100%; }
+
+.styleBtn {
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.45);
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-radius: 999px;
+  padding: 6px 10px;
+  cursor: pointer;
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.8);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease, transform 0.08s ease;
+}
+
+.styleBtn:hover:not(:disabled) { background: rgba(40, 44, 52, 0.7); }
+.styleBtn:active:not(:disabled) { transform: scale(0.96); }
+.styleBtn.sel {
+  color: #ffd54f;
+  border-color: #ffd54f;
+  background: rgba(255, 213, 79, 0.16);
+  box-shadow: 0 0 14px rgba(255, 213, 79, 0.35);
+}
+
+.swatch {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.5), inset 0 -3px 5px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+  padding: 0;
+  transition: transform 0.1s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.swatch:hover:not(:disabled) { transform: scale(1.1); }
+.swatch.sel {
+  border-color: #ffd54f;
+  transform: scale(1.2);
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.6), 0 0 14px rgba(255, 213, 79, 0.6), inset 0 -3px 5px rgba(0, 0, 0, 0.3);
+}
+
+.styleBtn:disabled, .swatch:disabled { opacity: 0.5; cursor: default; }
 
 #joinMsg { margin-top: 8px; font-size: 15px; font-weight: 600; min-height: 20px; text-shadow: 0 2px 8px rgba(0,0,0,0.8); }
 
@@ -374,6 +567,8 @@ html, body {
 }
 
 @media (max-width: 720px) {
+  #mapVoteGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .mapTile canvas { width: 92px; height: 56px; }
   #standings { display: none; }
   #hint { display: none; }
   #minimap { width: 160px; height: 106px; }

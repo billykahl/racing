@@ -4,7 +4,8 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
-import { trackByName, HALF_W, SHOULDER, WALL_DIST, TOTAL_LAPS, MAX_PLAYERS } from '/shared/track.js'
+import { trackByName, tracks, HALF_W, SHOULDER, WALL_DIST, TOTAL_LAPS, MAX_PLAYERS } from '/shared/track.js'
+import { CAR_STYLES, CAR_COLORS, clampStyle, clampColor } from '/shared/cars.js'
 import { World } from './world.js'
 import { Car } from './car.js'
 import { GameAudio } from './audio.js'
@@ -21,7 +22,12 @@ const elNotice = $('notice')
 const elJoinWrap = $('joinWrap')
 const elBtn = $('joinBtn')
 const elJoinMsg = $('joinMsg')
+const elMapVote = $('mapVote')
+const elMapGrid = $('mapVoteGrid')
+const elMapStatus = $('mapVoteStatus')
 const elName = $('nameInput')
+const elStyleRow = $('styleRow')
+const elColorRow = $('colorRow')
 const elResults = $('results')
 const elOverlay = $('overlay')
 const elOverlayMsg = $('overlayMsg')
@@ -318,12 +324,16 @@ function connect () {
     connected = false
     joined = false
     pending = false
+    carSent = null
     dropOwn()
     for (const r of remote.values()) removeRemote(r)
     remote.clear()
     carsSnap = []
     who = []
     standingsDirty = true
+    myVote = -1
+    voteOpen = false
+    renderVote()
     elOverlayMsg.textContent = 'Connection lost — reconnecting…'
     elOverlay.style.display = 'flex'
     setTimeout(connect, 1200)
@@ -358,15 +368,113 @@ function sendName () {
   ws.send(JSON.stringify({ t: 'name', name: want }))
 }
 
+// ---------- car picker ----------
+// `pick` is what the panel highlights (the player's latest click); `me.style` / `me.colorIdx` are what the
+// server has confirmed. The two diverge only while a `car` request is in flight or after a refused change.
+let pick = { style: 0, color: 0 }
+let carSent = null
+const styleBtns = CAR_STYLES.map((st, i) => {
+  const b = document.createElement('button')
+  b.className = 'styleBtn'
+  b.type = 'button'
+  b.textContent = st.label
+  b.addEventListener('click', () => {
+    choosePick(i, pick.color)
+    b.blur()
+  })
+  elStyleRow.appendChild(b)
+  return b
+})
+const swatchBtns = CAR_COLORS.map((hex, i) => {
+  const b = document.createElement('button')
+  b.className = 'swatch'
+  b.type = 'button'
+  b.style.background = hex
+  b.title = hex
+  b.setAttribute('aria-label', 'Colour ' + (i + 1))
+  b.addEventListener('click', () => {
+    choosePick(pick.style, i)
+    b.blur()
+  })
+  elColorRow.appendChild(b)
+  return b
+})
+
+function setPickUI () {
+  styleBtns.forEach((b, i) => b.classList.toggle('sel', i === pick.style))
+  swatchBtns.forEach((b, i) => b.classList.toggle('sel', i === pick.color))
+}
+
+function setPickerLocked (locked) {
+  for (const b of styleBtns) b.disabled = locked
+  for (const b of swatchBtns) b.disabled = locked
+}
+
+function loadSavedCar () {
+  try {
+    const v = JSON.parse(localStorage.getItem('race.car') || 'null')
+    if (v && typeof v === 'object') return { style: clampStyle(v.style), color: clampColor(v.color) }
+  } catch {
+    return null
+  }
+  return null
+}
+
+function choosePick (style, color) {
+  pick = { style: clampStyle(style), color: clampColor(color) }
+  setPickUI()
+  localStorage.setItem('race.car', JSON.stringify(pick))
+  sendCar()
+}
+
+function sendCar () {
+  if (!connected || ws.readyState !== 1 || !me) return
+  if (pick.style === me.style && pick.color === me.colorIdx) return
+  if (carSent && carSent.style === pick.style && carSent.color === pick.color) return
+  carSent = { style: pick.style, color: pick.color }
+  ws.send(JSON.stringify({ t: 'car', style: pick.style, color: pick.color }))
+}
+
+// Replace a Car model in place: same pose, same parent, old one disposed.
+function swapCar (old, colorHex, name, isSelf, style) {
+  const car = new Car(colorHex, name, isSelf, style)
+  car.group.position.copy(old.group.position)
+  car.group.quaternion.copy(old.group.quaternion)
+  const parent = old.group.parent
+  if (parent) {
+    parent.remove(old.group)
+    parent.add(car.group)
+  }
+  old.dispose()
+  return car
+}
+
+function applyOwnCar (style, color) {
+  const hex = CAR_COLORS[color]
+  if (me.style === style && me.colorIdx === color && me.color === hex) return
+  me.style = style
+  me.colorIdx = color
+  me.color = hex
+  if (ownCar) ownCar = swapCar(ownCar, me.color, me.name, true, me.style)
+}
+
 function handle (m) {
   if (m.t === 'init') {
-    me = { id: m.id, name: m.name, color: m.color }
+    const styleIdx = clampStyle(m.styleIdx !== undefined ? m.styleIdx : 0)
+    let colorIdx = m.colorIdx !== undefined ? clampColor(m.colorIdx) : CAR_COLORS.indexOf(String(m.color || '').toLowerCase())
+    if (colorIdx < 0) colorIdx = 0
+    me = { id: m.id, name: m.name, color: m.color || CAR_COLORS[colorIdx], style: styleIdx, colorIdx }
     nameMax = m.nameMax || 14
     elName.maxLength = nameMax
     // Reuse the name from last time; the server still gets the final say.
     const saved = (localStorage.getItem('race.name') || '').slice(0, nameMax)
     elName.value = saved || m.name
     if (saved && saved !== m.name) ws.send(JSON.stringify({ t: 'name', name: saved }))
+    // Same for the car: highlight the saved pick and ask the server for it if it differs from what we got.
+    pick = loadSavedCar() || { style: me.style, color: me.colorIdx }
+    setPickUI()
+    carSent = null
+    sendCar()
     LAPS = m.laps
     lobbySec = m.lobbySec
     graceSec = m.graceSec
@@ -378,12 +486,23 @@ function handle (m) {
     const local = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname)
     elModeWarn.style.display = !serverInfo.shared && !local ? 'block' : 'none'
     standingsDirty = true
+    myVote = -1
+    buildVoteTiles(m.maps || [])
+    applyVoteSnap(m)
     loadTrack(m.mapName)
   } else if (m.t === 'who') {
     who = Array.isArray(m.list) ? m.list : []
     standingsDirty = true
   } else if (m.t === 'map') {
     loadTrack(m.name)
+  } else if (m.t === 'voted') {
+    if (m.ok) {
+      myVote = m.map
+      renderVote()
+    } else {
+      elJoinMsg.textContent = m.why || 'Vote not counted'
+      setTimeout(() => { elJoinMsg.textContent = '' }, 4000)
+    }
   } else if (m.t === 'joined') {
     if (m.ok) {
       pending = true
@@ -406,6 +525,20 @@ function handle (m) {
         elName.classList.remove('bad')
         elJoinMsg.textContent = ''
       }, 3000)
+    }
+  } else if (m.t === 'car') {
+    carSent = null
+    const style = clampStyle(m.style)
+    const color = clampColor(m.color)
+    // Whether accepted or refused, the reply carries the values now in effect.
+    pick = { style, color }
+    setPickUI()
+    if (me) applyOwnCar(style, color)
+    if (m.ok) {
+      localStorage.setItem('race.car', JSON.stringify(pick))
+    } else {
+      elJoinMsg.textContent = m.why || 'Car not changed'
+      setTimeout(() => { elJoinMsg.textContent = '' }, 3000)
     }
   } else if (m.t === 'left') {
     dropOwn()
@@ -435,11 +568,18 @@ function handle (m) {
         continue
       }
       let r = remote.get(c.id)
+      const sty = clampStyle(c.sty)
       if (!r) {
-        r = { id: c.id, buf: [], x: c.x, z: c.z, a: c.a, col: c.col, n: c.n, car: null, idx: -1, spd: 0, flags: 0, l: 0, p: 0, quat: new THREE.Quaternion(), up: new THREE.Vector3(0, 1, 0), lastSkid: null }
-        r.car = new Car(c.col, c.n, false)
+        r = { id: c.id, buf: [], x: c.x, z: c.z, a: c.a, col: c.col, sty, n: c.n, car: null, idx: -1, spd: 0, flags: 0, l: 0, p: 0, quat: new THREE.Quaternion(), up: new THREE.Vector3(0, 1, 0), lastSkid: null }
+        r.car = new Car(c.col, c.n, false, sty)
         if (world) scene.add(r.car.group)
         remote.set(c.id, r)
+      } else if (r.col !== c.col || r.sty !== sty) {
+        // A rival re-picked their car in the lobby: rebuild it where it stands. The label / place badge is
+        // refreshed by rebuildStandings on the next HUD tick (standingsDirty is set below).
+        r.col = c.col
+        r.sty = sty
+        r.car = swapCar(r.car, c.col, c.n, false, sty)
       }
       r.n = c.n
       r.spd = c.s
@@ -473,6 +613,8 @@ function handle (m) {
         own.cpHalf = false
       }
     }
+    if (phase === 'lobby' && lastPhase !== 'lobby') myVote = -1
+    applyVoteSnap(m)
     lastPhase = phase
   }
 }
@@ -502,7 +644,7 @@ function spawnOwn (slot) {
     steer: 0, boost: 1, boostOn: false, boostCd: 0, drifting: false, driftDir: 0, driftT: 0, driftRamp: 0, turbo: 0, slipVis: 0, fwd: 0, lat: 0, off: false, shoulder: false,
     normal: new THREE.Vector3(0, 1, 0), quat: new THREE.Quaternion(), hitCool: 0, lastSkidL: null, lastSkidR: null, moved: false, slot
   }
-  ownCar = new Car(me.color, me.name, true)
+  ownCar = new Car(me.color, me.name, true, me.style)
   scene.add(ownCar.group)
   placeCar(ownCar, own.x, own.y, own.z, own.a, own.quat)
   boostPress = false
@@ -515,6 +657,118 @@ function respawnOwn (slot) {
   Object.assign(own, { x: g.x, z: g.z, y: g.y, a: g.a, vx: 0, vz: 0, idx: n.idx, lap: 0, prog: n.prog, prevProg: n.prog, cpHalf: false, fin: false, boost: 1, boostOn: false, boostCd: 0, drifting: false, driftDir: 0, driftT: 0, driftRamp: 0, turbo: 0, fwd: 0, lat: 0 })
   boostPress = false
   camReset = true
+}
+
+// ---------- lobby map vote ----------
+let mapNames = []
+let voteTally = []
+let voteOpen = false
+let voteMapIdx = -1
+let myVote = -1
+let voteKey = ''
+const voteTiles = [] // { btn, count, name }
+
+// Small north-up thumbnail of the centreline, drawn once per map.
+function drawThumb (cv, tr) {
+  const dpr = 2
+  const W = 104 * dpr
+  const H = 64 * dpr
+  cv.width = W
+  cv.height = H
+  const g = cv.getContext('2d')
+  g.fillStyle = 'rgba(30, 40, 30, 0.9)'
+  g.fillRect(0, 0, W, H)
+  const pad = 8 * dpr
+  const s = Math.min((W - pad * 2) / (tr.maxX - tr.minX), (H - pad * 2) / (tr.maxZ - tr.minZ))
+  const ox = (W - (tr.maxX - tr.minX) * s) / 2
+  const oz = (H - (tr.maxZ - tr.minZ) * s) / 2
+  const X = p => ox + (p.x - tr.minX) * s
+  const Z = p => oz + (p.z - tr.minZ) * s
+  g.lineCap = g.lineJoin = 'round'
+  const path = () => {
+    g.beginPath()
+    tr.pts.forEach((p, i) => (i === 0 ? g.moveTo(X(p), Z(p)) : g.lineTo(X(p), Z(p))))
+    g.closePath()
+  }
+  path()
+  g.lineWidth = 7 * dpr
+  g.strokeStyle = 'rgba(0,0,0,0.55)'
+  g.stroke()
+  path()
+  g.lineWidth = 4.5 * dpr
+  g.strokeStyle = '#9aa0a8'
+  g.stroke()
+  const p0 = tr.pts[0]
+  g.strokeStyle = '#fff'
+  g.lineWidth = 2 * dpr
+  g.beginPath()
+  g.moveTo(X(p0) - p0.tz * 4 * dpr, Z(p0) + p0.tx * 4 * dpr)
+  g.lineTo(X(p0) + p0.tz * 4 * dpr, Z(p0) - p0.tx * 4 * dpr)
+  g.stroke()
+}
+
+function buildVoteTiles (names) {
+  if (names.join('\u0000') === mapNames.join('\u0000') && voteTiles.length) return
+  mapNames = names
+  voteTiles.length = 0
+  elMapGrid.innerHTML = ''
+  names.forEach((name, idx) => {
+    const btn = document.createElement('button')
+    btn.type = 'button'
+    btn.className = 'mapTile'
+    btn.title = 'Vote for ' + name
+    const cv = document.createElement('canvas')
+    const tr = trackByName(name) || tracks[idx]
+    if (tr) drawThumb(cv, tr)
+    const nm = document.createElement('span')
+    nm.className = 'mapName'
+    nm.textContent = name
+    const cnt = document.createElement('span')
+    cnt.className = 'mapCount'
+    btn.append(cv, nm, cnt)
+    btn.addEventListener('click', () => {
+      audio.resume()
+      if (!connected || ws.readyState !== 1 || phase !== 'lobby' || !voteOpen || myVote === idx) return
+      ws.send(JSON.stringify({ t: 'vote', map: idx }))
+    })
+    elMapGrid.appendChild(btn)
+    voteTiles.push({ btn, count: cnt, name })
+  })
+  voteKey = ''
+  renderVote()
+}
+
+function applyVoteSnap (m) {
+  if (Array.isArray(m.votes)) {
+    voteTally = m.votes
+    voteOpen = !!m.voteOpen
+    voteMapIdx = typeof m.mapIdx === 'number' ? m.mapIdx : -1
+  } else if (phase !== 'lobby') {
+    voteOpen = false
+  }
+  renderVote()
+}
+
+// Only touches the DOM when something visible changed.
+function renderVote () {
+  if (!voteTiles.length) return
+  const key = voteTally.join(',') + '|' + (voteOpen ? 1 : 0) + '|' + voteMapIdx + '|' + myVote + '|' + (connected ? 1 : 0)
+  if (key === voteKey) return
+  voteKey = key
+  const max = Math.max(0, ...voteTally)
+  voteTiles.forEach((t, i) => {
+    const n = voteTally[i] || 0
+    const txt = n ? String(n) : ''
+    if (t.count.textContent !== txt) t.count.textContent = txt
+    t.btn.disabled = !voteOpen || !connected
+    t.btn.classList.toggle('lead', voteOpen && n > 0 && n === max)
+    t.btn.classList.toggle('mine', myVote === i)
+    t.btn.classList.toggle('win', !voteOpen && i === voteMapIdx)
+  })
+  const winName = mapNames[voteMapIdx] || mapName
+  elMapStatus.textContent = voteOpen
+    ? (myVote >= 0 ? 'Your vote: ' + mapNames[myVote] + ' — click another map to change it' : 'Most votes wins • ties are a coin flip')
+    : 'Voting closed — racing ' + winName
 }
 
 // ---------- track / world ----------
@@ -1267,6 +1521,7 @@ function hud (dt) {
         ? mapName + ' • you are on the grid (' + n + '/' + MAX_PLAYERS + ') — get ready!'
         : mapName + ' • ' + n + '/' + MAX_PLAYERS + ' on the grid — click JOIN RACE to enter'
     }
+    if (voteOpen) sm += ' • vote for the next map'
   } else if (phase === 'countdown') {
     pm = ''
     sm = joined ? 'Lights out and away we go…' : 'Grid is locked — ' + n + ' racing · spectating'
@@ -1313,9 +1568,12 @@ function hud (dt) {
 
   const canJoin = phase === 'lobby' && connected && !joined && ws.readyState === 1
   elJoinWrap.style.display = phase === 'lobby' && (canJoin || joined) ? 'block' : 'none'
+  elMapVote.style.display = phase === 'lobby' && voteTiles.length ? 'block' : 'none'
   elBtn.disabled = !canJoin
   elBtn.textContent = joined ? 'ON THE GRID ✓' : 'JOIN RACE'
   elName.disabled = !(connected && ws.readyState === 1)
+  // The server locks the car from countdown until results clear; the panel is only shown in the lobby anyway.
+  setPickerLocked(!(connected && ws.readyState === 1) || phase !== 'lobby')
   elLeave.style.display = joined && phase === 'lobby' ? 'inline-block' : 'none'
 
   let info = ''
